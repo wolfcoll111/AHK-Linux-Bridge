@@ -1,0 +1,27 @@
+[project]
+name = "ahk-linux-bridge"
+version = "0.1.0"
+description = "Cross-platform AHK v2 macro engine for Linux (X11 + Wayland via uinput)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+ahk-bridge = "ahk_bridge.cli:main"
+
+[project.optional-dependencies]
+uinput = ["evdev>=1.6"]
+x11 = ["python-xlib>=0.33"]
+portal = ["dbus-next>=0.2"]
+pixels = ["mss>=9.0", "Pillow>=10.0"]
+test = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

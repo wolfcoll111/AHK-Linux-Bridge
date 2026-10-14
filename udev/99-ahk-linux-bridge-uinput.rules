@@ -1,0 +1,6 @@
+# udev rule: allow non-root access to /dev/uinput for AHK-Linux-Bridge
+# Install: sudo cp 99-ahk-linux-bridge-uinput.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+# Then add your user to the input group: sudo usermod -aG input $USER
+# Log out + back in. Verify with: ls -l /dev/uinput  (should be crw-rw---- root input)
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput", TAG+="uaccess"
