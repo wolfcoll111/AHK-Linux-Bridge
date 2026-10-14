@@ -1,0 +1,17 @@
+[Unit]
+Description=AHK Linux Bridge macro daemon (%i)
+Documentation=https://github.com/wolfcoll111/AHK-Linux-Bridge
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Copy this file to ~/.config/systemd/user/ahk-bridge@.service, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ahk-bridge@farm.service
+# with your macro at ~/macros/farm.ahk (instance name %i maps to ~/macros/%i.ahk).
+ExecStart=/usr/bin/ahk-bridge run %h/macros/%i.ahk --jitter 0.2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

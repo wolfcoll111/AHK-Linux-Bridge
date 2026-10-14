@@ -1,19 +1,20 @@
 """MVP parser for an AHK v2 subset.
 
-Supported (v0.1):
+Supported (v0.2):
   #Requires AutoHotkey v2.0
   F1::            / F1::Send "hi"      (hotkeys, single + block form)
   :*:btw::by the way                  (hotstrings)
-  Send "text" / SendInput "text"
-  Click [x, y] [left|right|middle]
+  Send/SendInput/SendEvent/SendPlay/SendText "text" (+ {Enter}{F1}... keys)
+  Click [x, y] [left|right|middle] / MouseClick [, btn, x, y]
   MouseMove x, y
-  Sleep ms
-  Loop N { ... } / Loop { ... } (infinite until abort)
-  While cond { ... }  (cond: truthy var or `x < N` simple compare)
-  x := expr  (int/str/var)
+  Sleep ms-or-var
+  Loop N-or-var { ... } / Loop { ... } (infinite until abort)
+  While cond { ... }  (cond: truthy var or `x < N` compare, now with expr)
+  If cond { ... } [Else { ... }] / Break / Continue
+  x := expr  (int arithmetic, strings, Random(), vars)
   Name(args) { ... }  (function def) + Name(...) call
   MsgBox "text"  (-> log line)
-  WinActivate "title" / PixelSearch stubs (logged, non-fatal)
+  WinActivate "title" / PixelSearch (live via mss)
   Return (block terminator), ; comments
 """
 from __future__ import annotations
@@ -26,6 +27,8 @@ HOTSTRING_RE = re.compile(r'^\s*:([^:]*):([^:]+)::\s*(.*)$')
 FUNCDEF_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
 LOOP_RE = re.compile(r'^\s*Loop(?:\s+(\S+))?\s*\{\s*$', re.IGNORECASE)
 WHILE_RE = re.compile(r'^\s*While\s+(.+?)\s*\{\s*$', re.IGNORECASE)
+IF_RE = re.compile(r'^\s*If\s+(.+?)\s*\{\s*$', re.IGNORECASE)
+ELSE_RE = re.compile(r'^\s*(?:\}\s*)?Else\s*\{\s*$', re.IGNORECASE)
 
 
 @dataclass
@@ -46,17 +49,45 @@ class MouseMove:
 
 @dataclass
 class Sleep:
-    ms: int
+    ms: Any  # int or var/expr string (resolved at runtime)
+
 
 @dataclass
 class Loop:
-    count: int | None  # None = infinite
+    count: Any  # int | str(var/expr) | None (None = infinite)
     body: list = field(default_factory=list)
+
 
 @dataclass
 class While:
     cond: str
     body: list = field(default_factory=list)
+
+
+@dataclass
+class If:
+    cond: str
+    then_body: list = field(default_factory=list)
+    else_body: list = field(default_factory=list)
+
+
+@dataclass
+class Break:
+    pass
+
+
+@dataclass
+class Continue:
+    pass
+
+
+@dataclass
+class PixelSearch:
+    color: str
+    x1: Any = 0
+    y1: Any = 0
+    x2: Any = 0
+    y2: Any = 0
 
 @dataclass
 class Assign:
@@ -133,10 +164,34 @@ def parse_statement(line: str):
     s = line.strip()
     if not s or s.startswith(";"):
         return None
-    if s.lower().startswith("sendinput "):
-        return Send(_unquote(s[10:]))
-    if s.lower().startswith("send "):
-        return Send(_unquote(s[5:]))
+    low = s.lower()
+    if low in ("break", "break 1"):
+        return Break()
+    if low in ("continue"):
+        return Continue()
+    # Send family: Send / SendInput / SendEvent / SendPlay / SendText
+    for prefix in ("sendtext ", "sendinput ", "sendevent ", "sendplay ", "send "):
+        if low.startswith(prefix):
+            return Send(_unquote(s[len(prefix):]))
+    # bare Send("...") handled as FuncCall below; runtime maps it too.
+    m = re.match(r'(?i)^MouseClick\s*(.*)$', s)
+    if m:
+        rest = m.group(1).strip()
+        # MouseClick [, WhichButton, X, Y, ClickCount, ...] -> map to Click
+        parts = [p.strip() for p in rest.split(",")] if rest else []
+        button = "left"
+        x = y = None
+        count = 1
+        if parts and parts[0].lower() in ("left", "right", "middle"):
+            button = parts[0].lower()
+            parts = parts[1:]
+        nums = re.findall(r'-?\d+', rest)
+        if len(nums) >= 2:
+            # last two numbers are usually X, Y
+            x, y = int(nums[-2]), int(nums[-1])
+        if nums and button in rest.lower():
+            pass
+        return Click(x, y, button, count)
     m = re.match(r'(?i)^click\s*(.*)$', s)
     if m:
         rest = m.group(1).strip()
@@ -153,27 +208,57 @@ def parse_statement(line: str):
     m = re.match(r'(?i)^mousemove\s+(-?\d+)\s*,\s*(-?\d+)', s)
     if m:
         return MouseMove(int(m.group(1)), int(m.group(2)))
-    m = re.match(r'(?i)^sleep\s+(\d+)', s)
+    m = re.match(r'(?i)^sleep\s+(.+)$', s)
     if m:
-        return Sleep(int(m.group(1)))
+        raw_ms = m.group(1).strip().split(";")[0].strip()
+        # keep raw for runtime var/expr resolution; int fast-path
+        try:
+            return Sleep(int(raw_ms))
+        except ValueError:
+            return Sleep(raw_ms)
     m = re.match(r'(?i)^msgbox\s*(.*)$', s)
     if m:
         return MsgBox(_unquote(m.group(1)))
     m = re.match(r'(?i)^winactivate\s*(.*)$', s)
     if m:
         return WinActivate(_unquote(m.group(1)))
+    m = re.match(r'(?i)^pixelsearch\s*(.*)$', s)
+    if m:
+        # PixelSearch &Ox, &Oy, X1, Y1, X2, Y2, Color [, Variation]
+        # v0.2: store color + box; runtime does live search via mss.
+        rest = m.group(1).strip()
+        parts = _parse_args(rest)
+        color = parts[-2] if len(parts) >= 2 else (parts[-1] if parts else "0xFFFFFF")
+        nums = re.findall(r'-?\d+|0[xX][0-9a-fA-F]+', rest)
+        box = [0, 0, 0, 0]
+        if len(nums) >= 5:
+            # skip first two (&vars), take X1 Y1 X2 Y2
+            try:
+                box = [int(x, 0) for x in nums[2:6]]
+            except ValueError:
+                pass
+        return PixelSearch(color=str(color), x1=box[0], y1=box[1], x2=box[2], y2=box[3])
     m = re.match(r'^\s*([A-Za-z_]\w*)\s*:=\s*(.+)$', s)
     if m:
-        val = m.group(2).strip()
-        try:
-            v: Any = int(val)
-        except ValueError:
-            v = _unquote(val)
-        return Assign(m.group(1), v)
+        # Keep RAW expression for runtime eval (arithmetic, Random(), etc.).
+        # Strip trailing comment.
+        val = m.group(2).split(";")[0].strip()
+        return Assign(m.group(1), val)
     m = re.match(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*$', s)
     if m:
         return FuncCall(m.group(1), _parse_args(m.group(2)))
     return FuncCall("__raw__", [s])  # unknown -> logged, non-fatal
+
+
+def _parse_loop_count(raw: str | None):
+    if raw is None:
+        return None
+    raw = raw.strip()
+    try:
+        return int(raw)
+    except ValueError:
+        # var name or expression -> resolve at runtime
+        return raw
 
 
 def _parse_block(lines: list[str], i: int):
@@ -188,20 +273,25 @@ def _parse_block(lines: list[str], i: int):
             continue
         if s == "}" or s.lower() == "return":
             return stmts, i + 1
+        # Else on its own line after a closed If-block is handled by the
+        # If-branch below (lookahead); a stray Else here closes this block.
+        if re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', s):
+            return stmts, i  # let caller consume Else
         mf = FUNCDEF_RE.match(raw)
         if mf:
             params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
+            # strip & / default values: `&x, y := 1` -> x, y
+            clean = []
+            for p in params:
+                p = p.lstrip("&").strip()
+                p = p.split(":=")[0].strip().split("=")[0].strip()
+                clean.append(p.split()[0])
             body, i = _parse_block(lines, i + 1)
-            stmts.append(FuncDef(mf.group(1), params, body))
+            stmts.append(FuncDef(mf.group(1), clean, body))
             continue
         m = LOOP_RE.match(raw)
         if m:
-            cnt = None
-            if m.group(1) is not None:
-                try:
-                    cnt = int(m.group(1))
-                except ValueError:
-                    cnt = None  # var/∞ -> treat as infinite in v0.1
+            cnt = _parse_loop_count(m.group(1))
             body, i = _parse_block(lines, i + 1)
             stmts.append(Loop(cnt, body))
             continue
@@ -209,6 +299,19 @@ def _parse_block(lines: list[str], i: int):
         if m:
             body, i = _parse_block(lines, i + 1)
             stmts.append(While(m.group(1).strip(), body))
+            continue
+        m = IF_RE.match(raw)
+        if m:
+            cond = m.group(1).strip()
+            then_body, i = _parse_block(lines, i + 1)
+            else_body: list = []
+            # consume `} Else {` split across lines: _parse_block stopped
+            # BEFORE the Else line (returned i pointing at Else), or the
+            # closing brace was consumed and next line is `Else {`.
+            if i < n and re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', lines[i].strip()):
+                i += 1
+                else_body, i = _parse_block(lines, i)
+            stmts.append(If(cond, then_body, else_body))
             continue
         st = parse_statement(raw)
         if st is not None:
@@ -264,17 +367,17 @@ def parse_script(text: str) -> Script:
         mf = FUNCDEF_RE.match(raw)
         if mf:
             params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
+            clean = []
+            for p in params:
+                p = p.lstrip("&").strip()
+                p = p.split(":=")[0].strip().split("=")[0].strip()
+                clean.append(p.split()[0])
             body, i = _parse_block(lines, i + 1)
-            sc.functions[mf.group(1)] = FuncDef(mf.group(1), params, body)
+            sc.functions[mf.group(1)] = FuncDef(mf.group(1), clean, body)
             continue
         m = LOOP_RE.match(raw)
         if m:
-            cnt = None
-            if m.group(1) is not None:
-                try:
-                    cnt = int(m.group(1))
-                except ValueError:
-                    cnt = None
+            cnt = _parse_loop_count(m.group(1))
             body, i = _parse_block(lines, i + 1)
             sc.auto_section.append(Loop(cnt, body))
             continue
@@ -282,6 +385,19 @@ def parse_script(text: str) -> Script:
         if m:
             body, i = _parse_block(lines, i + 1)
             sc.auto_section.append(While(m.group(1).strip(), body))
+            continue
+        m = IF_RE.match(raw)
+        if m:
+            cond = m.group(1).strip()
+            # _parse_block handles the Else lookahead internally when the
+            # If is at block level; at top level replicate it here.
+            then_body, ni = _parse_block(lines, i + 1)
+            else_body: list = []
+            if ni < n and re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', lines[ni].strip()):
+                ni += 1
+                else_body, ni = _parse_block(lines, ni)
+            sc.auto_section.append(If(cond, then_body, else_body))
+            i = ni
             continue
         st = parse_statement(raw)
         if st is not None:

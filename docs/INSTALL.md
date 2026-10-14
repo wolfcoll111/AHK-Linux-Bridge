@@ -42,7 +42,39 @@ ahk-bridge check
 ```bash
 ahk-bridge run examples/hello.ahk --backend dry        # no perms needed
 ahk-bridge run examples/farm_loop.ahk --hotkey F1      # real run
+ahk-bridge run examples/afk_farm_advanced.ahk --hotkey F1 --jitter 0.2  # anti-AFK
+ahk-bridge run examples/afk_farm_advanced.ahk --list-hotkeys            # inspect
+ahk-bridge windows "ahk_exe RobloxPlayerBeta.exe"      # find game window
+ahk-bridge pixels FF8800 --region 800,400,1100,700     # live pixel check
+ahk-bridge record --seconds 15                         # evdev capture -> .json + .ahk
 ```
+
+## 5b. CachyOS / Hyprland integration (verified: Hyprland 0.56, Wayland)
+```bash
+mkdir -p ~/macros && cp examples/afk_farm_advanced.ahk ~/macros/farm.ahk
+cp integrations/ahk-bridge.desktop ~/.local/share/applications/
+```
+Lua-config users (`hyprland.lua` + `custom.lua`): append the binds from
+`integrations/hyprland-snippet.conf` in `hl.bind` / `hl.window_rule` form —
+SUPER+F1 fires the farm loop, SUPER+SHIFT+F1 kills looping runs — then
+`hyprctl reload`. Keybinds use `SUPER+F1` (not bare `F1`) so in-game F1 keeps
+working; the script hotkey stays `F1::` and is fired via `--hotkey F1`.
+
+Optional daemon (one macro kept alive by systemd):
+```bash
+cp integrations/ahk-bridge-daemon.service ~/.config/systemd/user/ahk-bridge@.service
+systemctl --user daemon-reload && systemctl --user enable --now ahk-bridge@farm.service
+```
+
+## 5c. Real AHK v2 under Wine (parity checks)
+```bash
+curl -L -o ahk.zip https://github.com/AutoHotkey/AutoHotkey/releases/download/v2.0.30/AutoHotkey_2.0.30.zip
+unzip ahk.zip -d ~/Apps/AutoHotkey-v2
+integrations/ahk-wine.sh examples/farm_loop.ahk   # genuine AHK 2.0.30 via Wine
+```
+Verified with wine-11.19. Run Wine games in a virtual desktop so Hyprland
+tiling never resizes the game mid-macro:
+`wine explorer /desktop=Game,1280x720 game.exe`.
 
 ## 6. Troubleshooting
 | Symptom | Fix |

@@ -49,6 +49,12 @@ class InputSimulator:
     def click(self, button: str = "left", count: int = 1, x: int | None = None, y: int | None = None):
         return self._b.click(button, count, x, y)
 
+    def scroll(self, clicks: int, horizontal: bool = False):
+        fn = getattr(self._b, "scroll", None)
+        if fn is not None:
+            return fn(clicks, horizontal)
+        return None
+
     def sleep_ms(self, ms: int):
         return self._b.sleep_ms(ms)
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AHK Linux Bridge
+Comment=AHK v2 macro engine for Linux (Wayland+X11 via uinput)
+Exec=ahk-bridge run %f
+Icon=utilities-terminal
+Terminal=true
+Categories=Utility;System;
+StartupWMClass=ahk-linux-bridge
+X-Portal-AppId=io.github.ahk-linux-bridge
