@@ -92,24 +92,34 @@ class UInputBackend:
             budget = 5.0
         if budget <= 0:
             return
-        time.sleep(min(0.5, budget))
-        remaining = budget - min(0.5, budget)
-        if remaining <= 0 or not _os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        # Base settle for all compositors (udev -> libinput thread pickup).
+        base = min(1.0, budget)
+        time.sleep(base)
+        remaining = budget - base
+        if remaining <= 0:
             return
-        import shutil as _sh
-        import subprocess as _sp
-        if _sh.which("hyprctl") is None:
+        # Hyprland: poll the compositor's device list (fast, exact).
+        if _os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            import shutil as _sh
+            import subprocess as _sp
+            if _sh.which("hyprctl") is None:
+                return
+            deadline = time.monotonic() + remaining
+            while time.monotonic() < deadline:
+                try:
+                    out = _sp.run(["hyprctl", "devices", "-j"], capture_output=True,
+                                  text=True, timeout=2)
+                    if out.returncode == 0 and "ahk-linux-bridge" in (out.stdout or ""):
+                        return
+                except Exception:
+                    pass
+                time.sleep(0.1)
             return
-        deadline = time.monotonic() + remaining
-        while time.monotonic() < deadline:
-            try:
-                out = _sp.run(["hyprctl", "devices", "-j"], capture_output=True,
-                              text=True, timeout=2)
-                if out.returncode == 0 and "ahk-linux-bridge" in (out.stdout or ""):
-                    return
-            except Exception:
-                pass
-            time.sleep(0.1)
+        # Other Wayland compositors (KWin, Mutter): no queryable device list,
+        # and KWin demonstrably needs ~1.5-2.5s (measured live on Plasma 6.7:
+        # 0.5s/1.0s probes flaky, >=1.5s reliable when focus is stable).
+        if _os.environ.get("WAYLAND_DISPLAY"):
+            time.sleep(min(1.5, remaining))
 
     def _code(self, key: str) -> int:
         ec = self._ecodes

@@ -258,31 +258,60 @@ class Runtime:
         if buf2:
             self.sim.type_text(buf2)
 
-    # -- WinActivate: best-effort via Hyprland, then log --
+    # -- WinActivate: best-effort across compositors --
     def _win_activate(self, title: str):
         title = self._interp(title)
+        if self._win_activate_hyprland(title):
+            return
+        if self._win_activate_xdotool(title):
+            return
+        self.logs.append(f"WinActivate {title!r} (linux match, best-effort)")
+
+    def _win_activate_hyprland(self, title: str) -> bool:
         try:
             import json
             import subprocess
             out = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True,
                                  text=True, timeout=5)
-            if out.returncode == 0:
-                clients = json.loads(out.stdout or "[]")
-                want = title.lower()
-                for c in clients:
-                    blob = " ".join(str(c.get(k, "")) for k in
-                                    ("title", "class", "initialTitle", "initialClass")).lower()
-                    if want and want in blob:
-                        addr = c.get("address")
-                        if addr:
-                            subprocess.run(["hyprctl", "dispatch", "focuswindow",
-                                            f"address:{addr}"],
-                                           capture_output=True, timeout=5)
-                            self.logs.append(f"WinActivate {title!r} -> focused {addr}")
-                            return
+            if out.returncode != 0:
+                return False
+            clients = json.loads(out.stdout or "[]")
+            want = title.lower()
+            for c in clients:
+                blob = " ".join(str(c.get(k, "")) for k in
+                                ("title", "class", "initialTitle", "initialClass")).lower()
+                if want and want in blob:
+                    addr = c.get("address")
+                    if addr:
+                        subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                                        f"address:{addr}"],
+                                       capture_output=True, timeout=5)
+                        self.logs.append(f"WinActivate {title!r} -> focused {addr}")
+                        return True
         except Exception:
             pass
-        self.logs.append(f"WinActivate {title!r} (linux match, best-effort)")
+        return False
+
+    def _win_activate_xdotool(self, title: str) -> bool:
+        """X11/XWayland path: covers Wine games, AHK Dash, Sober-less setups
+        on KDE Plasma, GNOME+X11 and Hyprland alike. Needs DISPLAY + xdotool."""
+        import shutil
+        import subprocess
+        if not shutil.which("xdotool"):
+            return False
+        try:
+            out = subprocess.run(["xdotool", "search", "--onlyvisible",
+                                  "--name", title],
+                                 capture_output=True, text=True, timeout=5)
+            wins = [w for w in (out.stdout or "").split() if w.strip().isdigit()]
+            if not wins:
+                return False
+            subprocess.run(["xdotool", "windowactivate", wins[0]],
+                           capture_output=True, timeout=5)
+            self.logs.append(f"WinActivate {title!r} -> X window {wins[0]}")
+            return True
+        except Exception:
+            return False
 
     # -- PixelSearch: live capture via mss, log result into vars --
     def _pixel_search(self, st: P.PixelSearch):

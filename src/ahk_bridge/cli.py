@@ -105,19 +105,14 @@ def cmd_record(args) -> int:
                         rec.click(btn)
                     elif ev.type == evdev.ecodes.EV_REL:
                         pass  # relative motion is too noisy; sampled below
-            # sample absolute pointer via hyprctl cursor pos (Wayland-safe)
-            try:
-                import subprocess
-                out = subprocess.run(["hyprctl", "cursorpos"], capture_output=True,
-                                     text=True, timeout=2)
-                if out.returncode == 0:
-                    x, y = (int(v) for v in out.stdout.strip().split(",")[:2])
-                    if last_pos[0] != (x, y):
-                        if last_pos[0] is not None:
-                            rec.move(x, y)
-                        last_pos[0] = (x, y)
-            except Exception:
-                pass
+            # sample absolute pointer (Wayland-safe per compositor)
+            pos = _cursor_pos()
+            if pos is not None:
+                x, y = pos
+                if last_pos[0] != (x, y):
+                    if last_pos[0] is not None:
+                        rec.move(x, y)
+                    last_pos[0] = (x, y)
     except KeyboardInterrupt:
         pass
     with open(args.out, "w") as f:
@@ -133,24 +128,47 @@ def cmd_record(args) -> int:
 
 
 def cmd_windows(args) -> int:
-    """List windows (Hyprland) optionally filtered by ahk_exe/class/title spec."""
+    """List windows (Hyprland, else X11/XWayland via xdotool) optionally
+    filtered by ahk_exe/class/title spec."""
     from . import window_match as wm
+    import shutil
     import subprocess
-    try:
-        out = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True,
-                             text=True, timeout=5)
-        if out.returncode != 0:
-            raise RuntimeError(out.stderr.strip() or "hyprctl failed")
-        clients = json.loads(out.stdout or "[]")
-        wins = [{"exe": c.get("initialClass", ""), "class": c.get("class", ""),
-                 "title": c.get("title", ""), "app_id": c.get("class", ""),
-                 "address": c.get("address", "")} for c in clients]
-    except FileNotFoundError:
-        print("hyprctl not found (not a Hyprland session?)", file=sys.stderr)
+    wins: list[dict] = []
+    if shutil.which("hyprctl"):
+        # NOTE: hyprctl may exist without a Hyprland session (multi-DE boxes);
+        # only trust it when it actually returns clients.
+        try:
+            out = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True,
+                                 text=True, timeout=5)
+            if out.returncode == 0:
+                clients = json.loads(out.stdout or "[]")
+                wins = [{"exe": c.get("initialClass", ""), "class": c.get("class", ""),
+                         "title": c.get("title", ""), "app_id": c.get("class", ""),
+                         "address": c.get("address", "")} for c in clients]
+        except Exception:
+            pass
+    if not wins and shutil.which("xdotool"):
+        # KDE Plasma / GNOME X11 / XWayland: enumerate visible X windows.
+        try:
+            out = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", ""],
+                                 capture_output=True, text=True, timeout=5)
+            for wid in (out.stdout or "").split():
+                if not wid.strip().isdigit():
+                    continue
+                name = subprocess.run(["xdotool", "getwindowname", wid],
+                                      capture_output=True, text=True,
+                                      timeout=5).stdout.strip()
+                cls = subprocess.run(["xdotool", "getwindowclassname", wid],
+                                     capture_output=True, text=True,
+                                     timeout=5).stdout.strip()
+                wins.append({"exe": cls, "class": cls, "title": name,
+                             "app_id": cls, "address": wid})
+        except Exception as e:
+            print(f"windows error: {e}", file=sys.stderr)
+            return 1
+    else:
+        print("windows needs hyprctl (Hyprland) or xdotool (X11/XWayland)", file=sys.stderr)
         return 2
-    except Exception as e:
-        print(f"windows error: {e}", file=sys.stderr)
-        return 1
     if args.spec:
         wins = wm.find_window(args.spec, wins)
     for w in wins:
@@ -191,6 +209,34 @@ def cmd_pixels(args) -> int:
         return 0
     print(f"color {color} not found (screen {w}x{h})")
     return 1
+
+
+def _cursor_pos():
+    """Current pointer (x, y) or None. Hyprland first, xdotool (X11/XWayland)
+    as fallback for KDE Plasma / GNOME."""
+    import shutil
+    import subprocess
+    try:
+        out = subprocess.run(["hyprctl", "cursorpos"], capture_output=True,
+                             text=True, timeout=2)
+        if out.returncode == 0:
+            vals = out.stdout.strip().replace(",", " ").split()
+            return int(vals[0]), int(vals[1])
+    except Exception:
+        pass
+    if shutil.which("xdotool"):
+        try:
+            out = subprocess.run(["xdotool", "getmouselocation", "--shell"],
+                                 capture_output=True, text=True, timeout=2)
+            xy = {}
+            for line in (out.stdout or "").splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    xy[k.strip()] = v.strip()
+            return int(xy["X"]), int(xy["Y"])
+        except Exception:
+            pass
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
