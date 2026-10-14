@@ -21,6 +21,9 @@ class DryBackend:
     def click(self, button="left", count=1, x=None, y=None):
         self.log.append(("click", button, count, x, y))
 
+    def scroll(self, clicks: int, horizontal: bool = False):
+        self.log.append(("scroll", clicks, horizontal))
+
     def sleep_ms(self, ms: int):
         self.log.append(("sleep", ms))
 

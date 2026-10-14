@@ -195,55 +195,68 @@ class Runtime:
 
     # -- Send with {Key} sequences --
     def _send_text(self, text: str):
-        """Type plain runs via type_text; tap {SpecialKey} via send_key."""
-        pos, buf = 0, ""
-        def flush():
-            nonlocal buf
-            if buf:
-                self.sim.type_text(buf)
-                buf = ""
+        """Type plain runs via type_text; tap {SpecialKey} via send_key.
+
+        Handles AHK Deluxe vocabulary found in real farming macros:
+        {Blind} (modifier-release guard, stripped), {LButton}/{RButton}/
+        {MButton} (clicks), {WheelUp}/{WheelDown} (scroll), {X down/up}
+        for named keys too (e.g. {Enter down}).
+        """
+        if not _SEND_TOKEN_RE.search(text):
+            if text:
+                self.sim.type_text(text)
+            return
+        buf2, last = "", 0
         for m in _SEND_TOKEN_RE.finditer(text):
-            flush()
-            token = m.group(1).strip()
-            low = token.lower()
-            if low in _SPECIAL_KEYS:
+            buf2 += text[last:m.start()]
+            tok = m.group(1).strip()
+            low = tok.lower()
+            if low == "blind":
+                pass  # mode flag only; type the rest normally
+            elif low in _SPECIAL_KEYS:
+                if buf2:
+                    self.sim.type_text(buf2)
+                    buf2 = ""
                 self.sim.send_key(_SPECIAL_KEYS[low])
-            elif re.match(r"(?i)^([a-z0-9]|f\d{1,2})\s+(down|up)$", token):
-                km = re.match(r"(?i)^([a-z0-9]|f\d{1,2})\s+(down|up)$", token)
-                self.sim.send_key(km.group(1), down=(km.group(2).lower() == "down"))
+            elif low in ("lbutton", "left"):
+                if buf2:
+                    self.sim.type_text(buf2)
+                    buf2 = ""
+                self.sim.click("left")
+            elif low in ("rbutton", "right"):
+                if buf2:
+                    self.sim.type_text(buf2)
+                    buf2 = ""
+                self.sim.click("right")
+            elif low in ("mbutton", "middle"):
+                if buf2:
+                    self.sim.type_text(buf2)
+                    buf2 = ""
+                self.sim.click("middle")
+            elif low in ("wheelup", "wheeldown"):
+                if buf2:
+                    self.sim.type_text(buf2)
+                    buf2 = ""
+                scroll = getattr(self.sim, "scroll", None)
+                if scroll is not None:
+                    scroll(1 if low == "wheelup" else -1)
             else:
-                # {varname} interpolation fallback (legacy scripts)
-                if token in self.vars:
-                    buf += str(self.vars[token])
-                else:
-                    buf += m.group(0)
-            pos = m.end()
-        # trailing plain text after last token
-        tail = text[pos:] if _SEND_TOKEN_RE.search(text) else text
-        # Reconstruct: walk again appending plain spans
-        if _SEND_TOKEN_RE.search(text):
-            buf2, last = "", 0
-            for m in _SEND_TOKEN_RE.finditer(text):
-                buf2 += text[last:m.start()]
-                tok = m.group(1).strip()
-                low = tok.lower()
-                if low in _SPECIAL_KEYS or re.match(r"(?i)^([a-z0-9]|f\d{1,2})\s+(down|up)$", tok):
+                dm = re.match(r"(?i)^(\w+)\s+(down|up)$", tok)
+                if dm:
+                    name, how = dm.group(1), dm.group(2).lower()
+                    code = _SPECIAL_KEYS.get(name.lower(), name)
                     if buf2:
                         self.sim.type_text(buf2)
                         buf2 = ""
+                    self.sim.send_key(code, down=(how == "down"))
+                elif tok in self.vars:
+                    buf2 += str(self.vars[tok])
                 else:
-                    if tok in self.vars:
-                        buf2 += str(self.vars[tok])
-                    else:
-                        buf2 += m.group(0)
-                last = m.end()
-            buf2 += text[last:]
-            if buf2:
-                self.sim.type_text(buf2)
-        else:
-            flush()
-            if tail:
-                self.sim.type_text(tail)
+                    buf2 += m.group(0)
+            last = m.end()
+        buf2 += text[last:]
+        if buf2:
+            self.sim.type_text(buf2)
 
     # -- WinActivate: best-effort via Hyprland, then log --
     def _win_activate(self, title: str):
