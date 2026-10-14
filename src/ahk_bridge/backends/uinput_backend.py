@@ -72,7 +72,44 @@ class UInputBackend:
         self._ui = UInput(events=events, name="ahk-linux-bridge")
         self._ecodes = ecodes
         self.log: list[tuple] = []
-        time.sleep(0.2)  # let compositor enumerate the virtual device
+        self._await_ready()
+
+    @staticmethod
+    def _await_ready():
+        """Wait until the compositor has routed the new virtual device.
+
+        A fresh uinput device needs enumeration (udev → libinput → compositor
+        keymap/focus setup) before events reach clients. Blind fixed sleeps
+        lose the race on Hyprland (verified: 0.2s drops everything, 3s works).
+        Strategy: short base sleep for all compositors, then poll Hyprland's
+        device list until our keyboard shows up. Override with
+        AHK_BRIDGE_UINPUT_WAIT (seconds, float; 0 = no wait).
+        """
+        import os as _os
+        try:
+            budget = float(_os.environ.get("AHK_BRIDGE_UINPUT_WAIT", "5.0"))
+        except ValueError:
+            budget = 5.0
+        if budget <= 0:
+            return
+        time.sleep(min(0.5, budget))
+        remaining = budget - min(0.5, budget)
+        if remaining <= 0 or not _os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            return
+        import shutil as _sh
+        import subprocess as _sp
+        if _sh.which("hyprctl") is None:
+            return
+        deadline = time.monotonic() + remaining
+        while time.monotonic() < deadline:
+            try:
+                out = _sp.run(["hyprctl", "devices", "-j"], capture_output=True,
+                              text=True, timeout=2)
+                if out.returncode == 0 and "ahk-linux-bridge" in (out.stdout or ""):
+                    return
+            except Exception:
+                pass
+            time.sleep(0.1)
 
     def _code(self, key: str) -> int:
         ec = self._ecodes
@@ -104,10 +141,14 @@ class UInputBackend:
             return getattr(ec, up)
         raise ValueError(f"unknown key {key!r}")
 
-    def _tap(self, code: int):
+    def _tap(self, code: int, hold_s: float = 0.012):
+        # NOTE: press and release must be separated by a real hold (~12ms).
+        # Back-to-back SYN frames (~50us apart) are coalesced/dropped by
+        # libinput before reaching Wayland clients (verified with wev).
         ec = self._ecodes
         self._ui.write(ec.EV_KEY, code, 1)
         self._ui.write(ec.EV_SYN, ec.SYN_REPORT, 0)
+        time.sleep(hold_s)
         self._ui.write(ec.EV_KEY, code, 0)
         self._ui.write(ec.EV_SYN, ec.SYN_REPORT, 0)
 

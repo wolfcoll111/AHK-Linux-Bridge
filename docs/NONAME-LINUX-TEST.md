@@ -48,5 +48,16 @@ placements as `.ahk` (see `examples/tds_placement.ahk`).
 - `Send "{LButton}/{RButton}/{MButton}"` unsupported → now clicks.
 - `Send "{WheelUp}/{WheelDown}"` unsupported → now scrolls.
 - `DryBackend` lacked `scroll()` → added for backend parity.
+- **CRITICAL — uinput device-setup race (the big one):** short-lived `run`
+  invocations created the virtual device, slept a fixed 0.2s, then fired
+  events into the void: evtest showed perfect kernel emission (KEY_A/B press
+  + release) while `wev`/`xev` received NOTHING and SUPER+2 never switched
+  workspaces. A persistent device + 3s wait delivered fine, isolating it to
+  compositor enumeration lag, not emission. Fix: `UInputBackend` now sleeps
+  0.5s base, then polls `hyprctl devices` (Hyprland only) up to
+  `AHK_BRIDGE_UINPUT_WAIT` (default 5s) until the keyboard appears; verified
+  end-to-end via `xev` (keycodes 38/56/9 + 52 with correct keysyms) and a live
+  SUPER+2 workspace switch. Earlier claims of "uinput works" (v0.2 notes)
+  were write-level only and overstated — corrected here.
 - New: `tests/test_send_sequences.py` (5 tests), `examples/tds_placement.ahk`.
 - Timing re-verified: Sleep drift +2 ms over 2 s; TDS burst exact.
