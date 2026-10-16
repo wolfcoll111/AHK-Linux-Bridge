@@ -240,6 +240,13 @@ class AssignTarget:
     target: str  # e.g. arr[i], obj.prop, a[i][k]
     value: Any
 
+
+@dataclass
+class ExprStmt:
+    """Side-effecting expression statement: `cond ? A() : B()`.
+    Evaluated and discarded (AHK v2 expression-statement semantics)."""
+    expr: str
+
 @dataclass
 class FuncDef:
     name: str
@@ -365,6 +372,22 @@ def _is_dyn_target(t: str) -> bool:
     return True
 
 
+def _split_top_ternary(s: str):
+    """Top-level `cond ? a : b` STATEMENT shape (dispatch with side
+    effects). Conservative: exactly one top-level `?` and one top-level
+    `:` with all parts non-empty; `:=`/`::` in the head disqualify
+    (assigns, labels). Nested/mixed shapes stay raw (status quo)."""
+    qparts = _split_top(s, "?")
+    if len(qparts) != 2 or not qparts[0].strip():
+        return None
+    if ":=" in qparts[0] or "::" in qparts[0]:
+        return None
+    cparts = _split_top(qparts[1], ":")
+    if len(cparts) != 2 or not cparts[0].strip() or not cparts[1].strip():
+        return None
+    return s.strip()
+
+
 def _match_call(s: str):
     """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
     Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
@@ -445,6 +468,35 @@ def _balanced_parens(s: str) -> bool:
             depth -= 1
             if depth < 0:
                 return False
+        k += 1
+    return depth == 0 and q is None
+
+
+def _is_wrapping_parens(s: str) -> bool:
+    """True only when the FIRST `(` pairs with the LAST char (linear).
+    `(x)` wraps; `(a) && b` and `(cond) ? a : b` do not, even though
+    both are balanced overall."""
+    if len(s) < 2 or not s.startswith("(") or not s.endswith(")"):
+        return False
+    depth, q, k = 0, None, 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            k += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0 and k < len(s) - 1:
+                return False  # closed before the end: not wrapping
         k += 1
     return depth == 0 and q is None
 
@@ -687,8 +739,12 @@ def parse_statement(line: str):
                     _c = f"!({_p})" if _neg else _p
                     _node = If(_c, [_node] if _node is not None else [])
                 return _node
-    # fully parenthesized statement: (stmt) -> inner
-    if s.startswith("(") and s.endswith(")") and _balanced_parens(s):
+    # fully parenthesized statement: (stmt) -> inner, but ONLY when the
+    # outer parens are a true wrapping pair. `_balanced_parens(s)` alone
+    # is not enough: `(cond) ? a : b` is balanced yet stripping mangles
+    # it into `cond) ? a : b(`. The first `(` must not close before the
+    # final char (linear scan, no nesting).
+    if s.startswith("(") and s.endswith(")") and _is_wrapping_parens(s):
         _inner = parse_statement(s[1:-1].strip())
         if _inner is not None and not (
                 isinstance(_inner, FuncCall) and _inner.name == "__raw__"):
@@ -699,6 +755,11 @@ def parse_statement(line: str):
         # Strip trailing comment.
         val = m.group(2).split(";")[0].strip()
         return Assign(m.group(1), val)
+    # Ternary dispatch statement: `(v.type = "str") ? UpdateStr(...) : ...`
+    # (Status.ahk command router). Evaluated for side effects at runtime.
+    t3 = _split_top_ternary(s)
+    if t3 is not None:
+        return ExprStmt(t3)
     mc = _match_call(s)
     if mc is not None:
         name, argstr, rest = mc

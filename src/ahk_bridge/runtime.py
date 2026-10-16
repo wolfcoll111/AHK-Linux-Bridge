@@ -267,6 +267,16 @@ class Runtime:
             self.vars[st.name] = self._eval_expr(st.value)
         elif isinstance(st, P.AssignTarget):
             self._assign_target(st.target, st.value)
+        elif isinstance(st, P.ExprStmt):
+            # Ternary dispatch: evaluate branches for side effects, drop
+            # the value (AHK v2 expression-statement semantics). Control
+            # flow (throw/ExitApp) must never be swallowed here.
+            try:
+                self._eval_expr(st.expr)
+            except (Aborted, RuntimeError):
+                raise
+            except Exception as e:
+                self.logs.append(f"expr {st.expr[:60]!r} eval failed: {e}")
         elif isinstance(st, P.CompoundAssign):
             name = st.name
             # v1 dynamic segments: hour_%status%_time, %j%_time
@@ -1114,6 +1124,12 @@ class Runtime:
         if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
             inner = s[1:-1]
             return self._interp(inner)
+        # strip one layer of redundant wrapping parens: ((x)), (go("a")).
+        # Same guard as _cond: only when the inside stays balanced, so
+        # `(a)+(b)` and `(a) ? b : c` shapes are untouched.
+        while len(s) >= 2 and s.startswith("(") and s.endswith(")") \
+                and self._balanced(s[1:-1]):
+            s = s[1:-1].strip()
         # Random(a, b) builtin -> int
         m = re.match(r"(?i)^random\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)$", s)
         if m:

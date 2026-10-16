@@ -17,9 +17,9 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **71 passed** (was 30 at v0.2.3; +F13 test, +2 dynamic-assign tests 2026-10-16).
-- Natro corpus: **150 files, 0 crashes, 524 functions, 22136 nodes, 410
-  `__raw__` unknowns = 1.85%** (session start ~13% + 6 crashes; v0.3 §6
+- `python3 -m pytest -q` → **73 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary tests 2026-10-16).
+- Natro corpus: **150 files, 0 crashes, 524 functions, 22135 nodes, 405
+  `__raw__` unknowns = 1.83%** (session start ~13% + 6 crashes; v0.3 §6
   close 417/1.88%).
 - `ahk-bridge check` → `detected_backend: uinput` on this machine.
 - Uncommitted at handoff time: NOTHING (everything below is committed).
@@ -91,6 +91,19 @@ Parser (`src/ahk_bridge/parser.py`):
     (3.4s on ONE 73-char line — exponential backtracking). Fix uses a
     flat `[A-Za-z_%][\w%]*` match + linear `_is_dyn_target` scan.
     Runtime derefs `%var%` in CompoundAssign names; `|=`/`&=` via ints.
+25. Ternary dispatch statements (`(v.type="str") ? UpdateStr() : UpdateInt()`,
+    Status.ahk command router — 5 raws fixed, 9 `ExprStmt` nodes). New
+    `ExprStmt` node (eval-and-discard, v2 expression-statement semantics;
+    throw/ExitApp propagate). Includes a TRUE-WRAP paren fix: the old
+    `(stmt)->inner` strip used bare balanced-ness and mangled
+    `(cond) ? a : b` into `cond) ? a : b(` — new `_is_wrapping_parens`
+    requires the first `(` to close at the last char. Runtime `_eval_expr`
+    strips one redundant paren layer (same guard as `_cond`), so
+    parenthesized branches `(go("x"))` execute. Lone `x = y` lines stay
+    raw on purpose: in AHK v2 those are compare-and-discard (author
+    v1-habit dead code, e.g. `%prefix%fps = newfps`). One `?`-led
+    join-fragment (`Status.ahk` `content := ...` tail) left: joiner
+    surgery for 1 node is not worth it.
 
 Runtime (`src/ahk_bridge/runtime.py`):
 24. `||`/`&&` inside EXPRESSIONS (`both := (...) || (...)`) → 1/0 via

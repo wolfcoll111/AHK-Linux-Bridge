@@ -216,3 +216,25 @@ def test_compound_assign_dynamic_name_ternary_value():
                    'BlenderAmount%i% += (c = "Sub") ? -1 : 1\n')
     rt.run_auto()
     assert rt.vars["BlenderAmount1"] == 4
+
+
+def test_ternary_statement_dispatch():
+    # Status.ahk command-router shape: cond ? callA() : callB().
+    t = ('hitA() {\nSend "A"\n}\nhitB() {\nSend "B"\n}\n'
+         'v := "a"\n(v = "a") ? hitA() : hitB()\n'
+         'w := "z"\n(w = "a") ? hitA() : hitB()\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[3]).__name__ == "ExprStmt"
+    rt.run_auto()
+    assert types(sim) == ["A", "B"]
+
+
+def test_ternary_statement_parenthesized_branches():
+    # Natro shape: branches wrapped in redundant parens.
+    t = ('go(x) {\nSend x\n}\n'
+         'location := "coconut"\n'
+         '(location = "coconut") ? (go("sweet")) : (go("other"))\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[1]).__name__ == "ExprStmt"
+    rt.run_auto()
+    assert types(sim) == ["sweet"]
