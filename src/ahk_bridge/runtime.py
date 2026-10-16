@@ -343,6 +343,16 @@ class Runtime:
 
     def _call_value(self, c: P.FuncCall):
         """Execute call, returning the function's Return value (or builtin)."""
+        name = c.name
+        if "%" in name:
+            # dynamic dispatch: nm_Tab%tab%%c%(), nm_FieldSelect%i%()
+            for _ in range(10):
+                dm = re.search(r"%([A-Za-z_]\w*)%", name)
+                if not dm:
+                    break
+                name = name[:dm.start()] + str(self.vars.get(dm.group(1), "")) + name[dm.end():]
+            if name != c.name:
+                c = P.FuncCall(name, c.args)
         if c.name == "__raw__":
             self.logs.append(f"raw: {c.args[0] if c.args else ''}")
             return ""

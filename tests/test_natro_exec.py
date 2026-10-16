@@ -238,3 +238,49 @@ def test_ternary_statement_parenthesized_branches():
     assert type(sc.auto_section[1]).__name__ == "ExprStmt"
     rt.run_auto()
     assert types(sim) == ["sweet"]
+
+
+def test_dynamic_call_name_dispatch():
+    # nm_Tab%tab%%c%() / nm_FieldSelect%i%() shapes: resolve %var%
+    # segments, then call normally; unknown targets are logged stubs.
+    t = ('go12() {\nSend "twelve"\n}\n'
+         'tab := 1\nc := 2\ngo%tab%%c%()\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[2]).__name__ == "FuncCall"
+    rt.run_auto()
+    assert types(sim) == ["twelve"]
+    _, rt2, _ = run('tab := 9\ngo%tab%()\n')
+    rt2.run_auto()  # no crash; stub logged
+    assert any("stub builtin go9" in e for e in rt2.logs)
+
+
+def test_indexed_method_call_parses_and_stubs():
+    # MainGui["X"].OnEvent("Click", fn) — GUI stub, never raw, never crash.
+    # Chain + Seq tail must survive: `, Redraw()` still runs second.
+    t = ('MainGui["ImageGitHubLink"].OnEvent("Click", GitHubRepoLink, 0)\n'
+         'MainGui["X"].Move(1), MainGui["X"].Redraw()\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[0]).__name__ == "FuncCall"
+    assert type(sc.auto_section[1]).__name__ == "Seq"
+    rt.run_auto()
+    assert any("stub builtin" in e for e in rt.logs)
+
+
+def test_chain_tail_seq_not_swallowed():
+    # `obj.M().N(), x()`: the `, x()` tail must still execute.
+    t = ('x() {\nSend "ran"\n}\nobj := 0\nobj.M().N(), x()\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[1]).__name__ == "Seq"
+    rt.run_auto()
+    assert types(sim) == ["ran"]
+
+
+def test_bare_index_read_probe():
+    # `MainGui[var]` existence probe: parses, never throws, try-else
+    # takes the no-throw path (same as AHK here).
+    t = ('var := "k"\nk := ""\ntry\n    MainGui[var]\ncatch\n'
+         '    k := "threw"\nelse\n    k := var\n')
+    sc, rt, _ = run(t)
+    assert type(sc.auto_section[2].try_body[0]).__name__ == "ExprStmt"
+    rt.run_auto()
+    assert rt.vars["k"] == "k"

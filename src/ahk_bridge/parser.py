@@ -388,14 +388,10 @@ def _split_top_ternary(s: str):
     return s.strip()
 
 
-def _match_call(s: str):
-    """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
-    Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
-    kept as part of rest for the caller to decide."""
-    m = re.match(r'^\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(', s)
-    if not m:
-        return None
-    depth, q, k = 0, None, m.end() - 1
+def _scan_balanced(s: str, k: int, open_ch: str, close_ch: str):
+    """Index just past the matching closer for the opener at s[k]
+    (quote- and backtick-aware), or -1. Linear, no nesting."""
+    depth, q = 0, None
     while k < len(s):
         ch = s[k]
         if ch == "`" and k + 1 < len(s):
@@ -406,14 +402,100 @@ def _match_call(s: str):
                 q = None
         elif ch in ('"', "'"):
             q = ch
-        elif ch == "(":
+        elif ch == open_ch:
             depth += 1
-        elif ch == ")":
+        elif ch == close_ch:
             depth -= 1
             if depth == 0:
-                return m.group(1), s[m.end():k], s[k + 1:].strip()
+                return k + 1
         k += 1
-    return None
+    return -1
+
+
+def _is_bare_index_read(s: str) -> bool:
+    """`Name[...][...]` covering the whole statement (linear scan).
+    Anything with parens/operators beyond the brackets is not bare."""
+    k = 0
+    while k < len(s) and s[k] in " \t":
+        k += 1
+    if k >= len(s) or not (s[k].isalpha() or s[k] == "_"):
+        return False
+    k += 1
+    while k < len(s) and (s[k].isalnum() or s[k] == "_"):
+        k += 1
+    if k >= len(s) or s[k] != "[":
+        return False
+    while k < len(s) and s[k] == "[":
+        after = _scan_balanced(s, k, "[", "]")
+        if after < 0:
+            return False
+        k = after
+    return s[k:].strip() == ""
+
+
+def _match_call(s: str):
+    """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
+    Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
+    kept as part of rest for the caller to decide.
+
+    The head is scanned linearly (not regexed): besides `Name` and
+    `.Name` segments it accepts v1 `%Name%` segments
+    (`nm_Tab%tab%%c%()`) and `[...]` indexers
+    (`MainGui["X"].OnEvent(...)`). A regex alternation here would nest
+    quantifiers and backtrack catastrophically on long lines."""
+    k = 0
+    while k < len(s) and s[k] in " \t":
+        k += 1
+    if k >= len(s) or not (s[k].isalpha() or s[k] == "_"):
+        return None
+    start = k
+    while k < len(s):
+        ch = s[k]
+        if ch.isalpha() or ch == "_":
+            k += 1
+            while k < len(s) and (s[k].isalnum() or s[k] == "_"):
+                k += 1
+        elif ch == "%":
+            j = s.find("%", k + 1)
+            if j < 0 or not re.fullmatch(r"[A-Za-z_]\w*", s[k + 1:j]):
+                return None
+            k = j + 1
+        elif ch == "[":
+            after = _scan_balanced(s, k, "[", "]")
+            if after < 0:
+                return None
+            k = after
+        elif ch == "." and k + 1 < len(s) and (s[k + 1].isalpha() or s[k + 1] == "_"):
+            k += 1  # `.Name` glued (a `.` with space after is concat, not a call)
+        else:
+            break
+    head = s[start:k]
+    m = re.match(r"\s*\(", s[k:])
+    if not m:
+        return None
+    paren = k + m.end() - 1
+    after = _scan_balanced(s, paren, "(", ")")
+    if after < 0:
+        return None
+    return head, s[paren + 1:after - 1], s[after:].strip()
+
+
+def _scan_chain(rest: str):
+    """Consume leading `.Method(...)` groups from a call tail with balanced
+    paren scans (linear). Returns ([method names], remainder index).
+    Unlike the old greedy regex, a trailing `, next()` Seq is preserved
+    instead of being swallowed into the chain."""
+    names, k, n = [], 0, len(rest)
+    while k < n:
+        dm = re.match(r"\.([A-Za-z_]\w*)\s*\(", rest[k:])
+        if not dm:
+            break
+        after = _scan_balanced(rest, k + dm.end() - 1, "(", ")")
+        if after < 0:
+            break
+        names.append(dm.group(1))
+        k = after
+    return names, k
 
 
 def _split_seq(s: str) -> list:
@@ -760,6 +842,11 @@ def parse_statement(line: str):
     t3 = _split_top_ternary(s)
     if t3 is not None:
         return ExprStmt(t3)
+    # Bare indexed read as existence probe: `MainGui[var]` inside
+    # try/catch (evaluated and discarded; never throws here, so a
+    # following try-`else` takes the same path as AHK's no-throw case).
+    if re.match(r"^[A-Za-z_]\w*\[", s) and _is_bare_index_read(s):
+        return ExprStmt(s.strip())
     mc = _match_call(s)
     if mc is not None:
         name, argstr, rest = mc
@@ -781,10 +868,10 @@ def parse_statement(line: str):
         # with `.`). A `.` appearing later (`, obj.M()`) is a new statement,
         # handled by the `,` branch below — never a chain.
         if rest.startswith("."):
-            chained = re.findall(r'\.([A-Za-z_]\w*)\s*\(', rest)
+            chained, _rk = _scan_chain(rest)
             if chained:
                 name = name + "+" + "+".join(chained)
-                rest = re.sub(r'(?:\.[A-Za-z_]\w*\s*\(.*\))+\s*$', '', rest, flags=re.DOTALL).strip()
+                rest = rest[_rk:].strip()
             if rest.startswith(","):
                 pass  # chain + more statements: fall into Seq below
             elif rest:

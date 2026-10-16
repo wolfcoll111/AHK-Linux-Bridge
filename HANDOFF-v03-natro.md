@@ -17,9 +17,9 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **73 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary tests 2026-10-16).
-- Natro corpus: **150 files, 0 crashes, 524 functions, 22135 nodes, 405
-  `__raw__` unknowns = 1.83%** (session start ~13% + 6 crashes; v0.3 §6
+- `python3 -m pytest -q` → **77 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary, +4 call-head tests 2026-10-16).
+- Natro corpus: **150 files, 0 crashes, 524 functions, 22180 nodes, 385
+  `__raw__` unknowns = 1.74%** (session start ~13% + 6 crashes; v0.3 §6
   close 417/1.88%).
 - `ahk-bridge check` → `detected_backend: uinput` on this machine.
 - Uncommitted at handoff time: NOTHING (everything below is committed).
@@ -104,6 +104,16 @@ Parser (`src/ahk_bridge/parser.py`):
     v1-habit dead code, e.g. `%prefix%fps = newfps`). One `?`-led
     join-fragment (`Status.ahk` `content := ...` tail) left: joiner
     surgery for 1 node is not worth it.
+26. Indexed/dynamic call heads (19 raws fixed): `_match_call` rewritten
+    as a linear head scanner accepting `%Name%` segments
+    (`nm_Tab%tab%%c%()`, resolved at runtime in `_call_value`) and
+    `[...]` indexers (`MainGui["X"].OnEvent(...)` → honest GUI stub).
+    Chain tails now split with balanced scans, so
+    `buff_values[i].__Enum().Call(&x), points.Push(...)` keeps its Seq
+    tail (the old greedy chain regex swallowed `, next()`). Bare
+    `MainGui[var]` existence probes → `ExprStmt` (eval-discard; try-`else`
+    takes the no-throw path, same as AHK). `(% "nm_" i%)()` left:
+    needs expression-evaluated callee, 1 instance, not worth it.
 
 Runtime (`src/ahk_bridge/runtime.py`):
 24. `||`/`&&` inside EXPRESSIONS (`both := (...) || (...)`) → 1/0 via
