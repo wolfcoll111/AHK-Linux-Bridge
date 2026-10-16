@@ -17,9 +17,9 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **78 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary, +5 call-head tests 2026-10-16).
-- Natro corpus: **150 files, 0 crashes, 524 functions, 22180 nodes, 384
-  `__raw__` unknowns = 1.73%** (session start ~13% + 6 crashes; v0.3 §6
+- `python3 -m pytest -q` → **80 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary, +5 call-head, +2 object-literal tests 2026-10-16).
+- Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
+  `__raw__` unknowns = 1.71%** (session start ~13% + 6 crashes; v0.3 §6
   close 417/1.88%).
 - `ahk-bridge check` → `detected_backend: uinput` on this machine.
 - Uncommitted at handoff time: NOTHING (everything below is committed).
@@ -120,6 +120,14 @@ Parser (`src/ahk_bridge/parser.py`):
     `%...%` and concatenates juxtaposed `"str"`/var parts, then routes
     through normal `_call_value`. Proven end-to-end with a `for` loop
     test (`nm_1` executes). Unknown targets are logged stubs.
+28. Object literals `{k: v}` (4 raws fixed): multi-line `Name := {` +
+    `k: v` + lone-`}` gathered at block level (lone-`}` closer, 40-line
+    cap, `:`-pair required, else untouched); runtime `_eval_expr`
+    builds a dict (bare keys literal, values evaluated, shape failures
+    fall through to old behavior). Covers `RobloxTypes := {...}` and
+    its live `case RobloxTypes.UWP:` dispatch. `Download url, (...)`
+    left on purpose: undefined function + v2-invalid command syntax
+    (dead upstream too).
 
 Runtime (`src/ahk_bridge/runtime.py`):
 24. `||`/`&&` inside EXPRESSIONS (`both := (...) || (...)`) → 1/0 via

@@ -1233,6 +1233,27 @@ class Runtime:
             from .parser import _split_seq as _ss3
             return [self._eval_expr(p) for p in
                     (q.strip() for q in _ss3(s[1:-1])) if p != ""]
+        # {...} object literal: {UWP: "UWP Version", Web: x}.
+        # Bare keys stay literal strings; values evaluate. On any shape
+        # problem fall through (old literal behavior) instead of dying.
+        if s.startswith("{") and s.endswith("}") and self._balanced(s[1:-1]):
+            try:
+                from .parser import _split_seq as _ss4
+                _d = {}
+                for _p in _ss4(s[1:-1]):
+                    _pp = _p.strip()
+                    if not _pp:
+                        continue
+                    _kv = self._split_logic(_pp, ":")
+                    if len(_kv) < 2 or not _kv[0].strip():
+                        continue
+                    _kk = _kv[0].strip()
+                    if len(_kk) >= 2 and _kk[0] == _kk[-1] and _kk[0] in ('"', "'"):
+                        _kk = _kk[1:-1]
+                    _d[_kk] = self._eval_expr(":".join(_kv[1:]).strip())
+                return _d
+            except Exception:
+                pass
         # ternary: cond ? a : b (top-level ? only)
         qm = self._split_ternary(s)
         if qm is not None:

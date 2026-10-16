@@ -1258,6 +1258,25 @@ def _parse_case_statement(lines: list[str], i: int):
             if parts:
                 return Assign(me.group(1), " ".join(parts)), k
         return Assign(me.group(1), ""), i + 1
+    # Multi-line object literal: `Name := {` + `k: v` lines + `}`.
+    # (`RobloxTypes := {UWP: ..., ...}` — Map()/arrays are single-line,
+    # but brace literals span lines.) Gathered only when the closer is a
+    # lone `}` within 40 lines and the inside holds `:` pairs; otherwise
+    # fall through untouched.
+    mo = re.match(r'^\s*([A-Za-z_]\w*)\s*:=\s*\{\s*(;.*)?$', code)
+    if mo:
+        j = i + 1
+        inner = []
+        n = len(lines)
+        while j < n and len(inner) < 40:
+            ln = _strip_comment(lines[j]).strip()
+            if ln == "}":
+                break
+            if ln and not ln.startswith(";"):
+                inner.append(ln)
+            j += 1
+        if j < n and lines[j].strip() == "}" and inner and any(":" in p for p in inner):
+            return Assign(mo.group(1), "{" + " ".join(inner) + "}"), j + 1
     st = parse_statement(raw)
     if isinstance(st, FuncCall) and re.match(r'^[A-Za-z_]\w*$', st.name or ""):
         # Allman function definition: `Name(args)` + `{` on the next line.

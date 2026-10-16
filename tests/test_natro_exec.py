@@ -299,3 +299,25 @@ def test_dyncall_expression_callee():
     _, rt2, _ = run('i := 9\n(%"nm_" i%)()\n')
     rt2.run_auto()
     assert any("stub builtin nm_9" in e for e in rt2.logs)
+
+
+def test_object_literal_assign_access_switch():
+    # `RobloxTypes := {UWP: ..., ...}` + `case RobloxTypes.UWP:` dispatch.
+    t = ('RobloxTypes := {UWP: "UWP Version", Web: "Web Version"}\n'
+         't := RobloxTypes.UWP\n'
+         'switch t {\ncase "UWP Version":\nSend "u"\ncase "Web Version":\nSend "w"\n}\n')
+    _, rt, sim = run(t)
+    rt.run_auto()
+    assert rt.vars["RobloxTypes"] == {"UWP": "UWP Version", "Web": "Web Version"}
+    assert rt.vars["t"] == "UWP Version"
+    assert types(sim) == ["u"]
+
+
+def test_object_literal_multiline():
+    # Corpus shape: `{` opener line, `k: v` lines, lone `}` closer.
+    t = ('RobloxTypes := {\nUWP: "UWP Version",\nWeb: "Web Version"\n}\n'
+         't := RobloxTypes.Web\nSend t\n')
+    _, rt, sim = run(t)
+    rt.run_auto()
+    assert rt.vars["t"] == "Web Version"
+    assert types(sim) == ["Web Version"]
