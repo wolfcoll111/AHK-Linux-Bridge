@@ -1,21 +1,15 @@
-"""MVP parser for an AHK v2 subset.
+"""AHK v2 subset parser (v0.3: NatroMacro-hardened).
 
-Supported (v0.2):
-  #Requires AutoHotkey v2.0
-  F1::            / F1::Send "hi"      (hotkeys, single + block form)
-  :*:btw::by the way                  (hotstrings)
-  Send/SendInput/SendEvent/SendPlay/SendText "text" (+ {Enter}{F1}... keys)
-  Click [x, y] [left|right|middle] / MouseClick [, btn, x, y]
-  MouseMove x, y
-  Sleep ms-or-var
-  Loop N-or-var { ... } / Loop { ... } (infinite until abort)
-  While cond { ... }  (cond: truthy var or `x < N` compare, now with expr)
-  If cond { ... } [Else { ... }] / Break / Continue
-  x := expr  (int arithmetic, strings, Random(), vars)
-  Name(args) { ... }  (function def) + Name(...) call
-  MsgBox "text"  (-> log line)
-  WinActivate "title" / PixelSearch (live via mss)
-  Return (block terminator), ; comments
+Single-line hotkeys, hotstrings, Send family + {Key} vocabulary, Click/
+MouseClick (expr coords), MouseMove (expr), Sleep (var/expr), Loop N/var +
+Loop Parse + v1 `Loop, N` tolerance, While, If (+single-line form, Else If
+chains), Break/Continue, Switch/Case/Default, For (int/list/StrSplit, else
+skip-log), Try/Catch/Finally (control flow never swallowed), x := expr
+(arithmetic, strings, Random(), StrSplit/SubStr/InStr/..., function calls,
+[...] literals, .Length), user functions + Return value, MsgBox, IniRead/
+IniWrite (real), WinActivate/PixelSearch, CoordMode/SendMode/Set* directives
+(logged), #Include (logged), global/static/local (no-ops), labels (skipped),
+`;` comments, continuation-line joining.
 """
 from __future__ import annotations
 import re
@@ -25,10 +19,41 @@ from typing import Any
 HOTKEY_RE = re.compile(r'^\s*([A-Za-z0-9_^!+#<>*~$ ]+?)::\s*(.*)$')
 HOTSTRING_RE = re.compile(r'^\s*:([^:]*):([^:]+)::\s*(.*)$')
 FUNCDEF_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
-LOOP_RE = re.compile(r'^\s*Loop(?:\s+(\S+))?\s*\{\s*$', re.IGNORECASE)
-WHILE_RE = re.compile(r'^\s*While\s+(.+?)\s*\{\s*$', re.IGNORECASE)
-IF_RE = re.compile(r'^\s*If\s+(.+?)\s*\{\s*$', re.IGNORECASE)
+CLASS_RE = re.compile(r'^\s*class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_]\w*))?\s*$', re.IGNORECASE)
+METHODDEF_RE = re.compile(r'^\s*(?:static\s+|public\s+|private\s+)*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
+STATIC_ASSIGN_RE = re.compile(r'^\s*static\s+([A-Za-z_]\w*\s*:=.+)$', re.IGNORECASE)
+LOOP_RE = re.compile(r'^\s*Loop\s*,?\s*(.+?)\s*(\{\s*)?$', re.IGNORECASE)
+LOOP_BARE_RE = re.compile(r'^\s*Loop\s*,?\s*(\{\s*)?$', re.IGNORECASE)
+LOOPPARSE_RE = re.compile(r'^\s*Loop\s+Parse\s*,?\s*(.*?)\s*(\{\s*)?$', re.IGNORECASE)
+LOOPFILES_RE = re.compile(r'^\s*Loop\s+Files\s*,?\s*(.*?)\s*(\{\s*)?$', re.IGNORECASE)
+FOR_RE = re.compile(r'^\s*For(?=\s|\()(.+?)\s+in\s+(.+?)\s*(\{\s*)?$', re.IGNORECASE)
+WHILE_RE = re.compile(r'^\s*While(?=\s|\()(.+?)\s*(\{\s*)?$', re.IGNORECASE)
+DO_RE = re.compile(r'^\s*Do\s*(\{\s*)?$', re.IGNORECASE)
+UNTIL_RE = re.compile(r'^\s*(?:\}\s*)?Until\s+(.+?)\s*$', re.IGNORECASE)
+IF_RE = re.compile(r'^\s*If(?=\s|\()(.+?)\s*(\{\s*)?$', re.IGNORECASE)
+IF_SINGLE_RE = re.compile(r'^\s*If(?=\s|\()(.+?)\s*$', re.IGNORECASE)
+ELSEIF_RE = re.compile(r'^\s*(?:\}\s*)?Else\s+If(?=\s|\()(.+?)\s*(\{\s*)?$', re.IGNORECASE)
 ELSE_RE = re.compile(r'^\s*(?:\}\s*)?Else\s*\{\s*$', re.IGNORECASE)
+SWITCH_RE = re.compile(r'^\s*Switch(?=\s|\()(.+?)\s*(\{\s*)?$', re.IGNORECASE)
+CASE_RE = re.compile(r'^\s*Case\s+(.+?)\s*:\s*$', re.IGNORECASE)
+DEFAULT_RE = re.compile(r'^\s*Default\s*:\s*$', re.IGNORECASE)
+TRY_RE = re.compile(r'^\s*Try\s*(\{\s*)?$', re.IGNORECASE)
+CATCH_RE = re.compile(r'^\s*(?:\}\s*)?Catch(?:\s+(?:as\s+)?(\w+))?\s*(\{\s*)?$', re.IGNORECASE)
+FINALLY_RE = re.compile(r'^\s*(?:\}\s*)?Finally\s*(\{\s*)?$', re.IGNORECASE)
+LABEL_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*:\s*$')
+LEGACY_CMD_RE = re.compile(r'^\s*(PostMessage|SendMessage|Run|RunWait|WinShow|WinHide|WinMinimize|WinMaximize|WinRestore|WinClose|WinKill|WinMove|ProcessClose|FileDelete|FileAppend|FileRead|FileCopy|FileMove|FileCreateShortcut|DirCreate|DirDelete|RegRead|RegWrite|RegDelete|ToolTip|TrayTip|SoundBeep|SoundPlay|ClipWait|Reload|Pause|Suspend|Edit|ListVars|KeyHistory|DetectHiddenText|SetCapsLockState|SetNumLockState|SetScrollLockState|BlockInput|Shutdown|Exit|Gosub|Goto|Sleep|Hotkey|Hotstring|SetTimer|SplitPath|SysGet|DriveGet|FileGetTime|FileGetSize|FileSetTime|IniDelete|MouseGetPos|MouseClickDrag|WinGetPos|WinGetTitle|WinGetText|WinGetClientPos|WinSetTransparent|MonitorGetWorkArea|ControlGetPos|ControlGetText|PixelGetColor)\b\s*,?\s*(.*)$', re.IGNORECASE)
+SETTING_RE = re.compile(r'^\s*(CoordMode|SendMode|SetWorkingDir|DetectHiddenWindows|SetTitleMatchMode|SetKeyDelay|SetMouseDelay|SetBatchLines|SetDefaultMouseSpeed|SetControlDelay|SetWinDelay|ListLines|ProcessSetPriority|Thread|Critical|KeyHistory|#Warn|#MaxThreads|#SingleInstance|#Requires|#HotIf|#NoTrayIcon|#NoEnv|#Persistent|#UseHook|#InstallKeybdHook|#InstallMouseHook|#MenuMaskKey|#Hotstring|#InputLevel)\b\s*(.*)$', re.IGNORECASE)
+INCLUDE_RE = re.compile(r'^\s*#Include(?:Again)?\s+(.*)$', re.IGNORECASE)
+DECL_RE = re.compile(r'^\s*(global|static|local)\b\s*(.*)$', re.IGNORECASE)
+
+# Statements that look like `Name(...) {` but are control flow, never a FuncDef.
+_KEYWORDS = frozenset({
+    "if", "else", "for", "while", "loop", "switch", "case", "default",
+    "try", "catch", "finally", "return", "sleep", "send", "sendinput",
+    "sendevent", "sendplay", "sendtext", "click", "mouseclick", "mousemove",
+    "msgbox", "winactivate", "pixelsearch", "keywait", "iniwrite", "iniread",
+    "throw", "exitapp", "class", "__raw__",
+})
 
 
 @dataclass
@@ -37,15 +62,18 @@ class Send:
 
 @dataclass
 class Click:
-    x: int | None = None
-    y: int | None = None
+    x: Any = None
+    y: Any = None
     button: str = "left"
     count: int = 1
+    opts: str = ""
+
 
 @dataclass
 class MouseMove:
-    x: int
-    y: int
+    x: Any
+    y: Any
+    speed: Any = None
 
 @dataclass
 class Sleep:
@@ -65,6 +93,12 @@ class While:
 
 
 @dataclass
+class DoUntil:
+    cond: str
+    body: list = field(default_factory=list)
+
+
+@dataclass
 class If:
     cond: str
     then_body: list = field(default_factory=list)
@@ -73,12 +107,12 @@ class If:
 
 @dataclass
 class Break:
-    pass
+    level: int = 1
 
 
 @dataclass
 class Continue:
-    pass
+    level: int = 1
 
 
 @dataclass
@@ -89,15 +123,134 @@ class PixelSearch:
     x2: Any = 0
     y2: Any = 0
 
+
+@dataclass
+class Return:
+    value: Any = None
+
+
+@dataclass
+class ScopeDecl:
+    kind: str  # global | static | local
+    names: list = field(default_factory=list)
+
+
+@dataclass
+class Switch:
+    value: str
+    cases: list = field(default_factory=list)  # [(cond_str|None, body)]
+
+
+@dataclass
+class For:
+    targets: list  # 1-2 loop var names
+    iterable: str
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class Try:
+    try_body: list = field(default_factory=list)
+    catch_var: str | None = None
+    catch_body: list = field(default_factory=list)
+    finally_body: list = field(default_factory=list)
+    else_body: list = field(default_factory=list)
+
+
+@dataclass
+class LoopParse:
+    text: str
+    delims: str = ""
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class LoopFiles:
+    pattern: str
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class KeyWait:
+    key: str
+    options: str = ""
+
+
+@dataclass
+class Seq:
+    items: list = field(default_factory=list)
+
+
+@dataclass
+class CompoundAssign:
+    name: str
+    op: str
+    value: Any
+
+
+@dataclass
+class IncDec:
+    name: str
+    delta: int  # +1 / -1
+
+
+@dataclass
+class Throw:
+    value: Any = None
+
+
+@dataclass
+class ExitApp:
+    code: Any = 0
+
+
+@dataclass
+class LegacyCmd:
+    name: str
+    rest: str = ""
+
+
+@dataclass
+class IniOp:
+    op: str  # read | write
+    value: Any = None
+    filename: str = ""
+    section: str = ""
+    key: str = ""
+
+
+@dataclass
+class Setting:
+    name: str
+    args: str = ""
+
+
+@dataclass
+class Include:
+    path: str
+
 @dataclass
 class Assign:
     name: str
+    value: Any
+
+
+@dataclass
+class AssignTarget:
+    target: str  # e.g. arr[i], obj.prop, a[i][k]
     value: Any
 
 @dataclass
 class FuncDef:
     name: str
     params: list
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class Class:
+    name: str
+    base: str | None = None
     body: list = field(default_factory=list)
 
 @dataclass
@@ -140,7 +293,7 @@ def _unquote(s: str) -> str:
 
 
 def _parse_args(argstr: str) -> list:
-    parts, cur, q = [], "", None
+    parts, cur, q, depth = [], "", None, 0
     for ch in argstr:
         if q:
             cur += ch
@@ -149,7 +302,13 @@ def _parse_args(argstr: str) -> list:
         elif ch in ('"', "'"):
             q = ch
             cur += ch
-        elif ch == ",":
+        elif ch in "([":
+            depth += 1
+            cur += ch
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+            cur += ch
+        elif ch == "," and depth == 0:
             parts.append(_unquote(cur))
             cur = ""
         else:
@@ -160,21 +319,180 @@ def _parse_args(argstr: str) -> list:
     return parts
 
 
+def _strip_comment(line: str) -> str:
+    """Cut `;` comments (AHK: `;` starts a comment at line start or after
+    whitespace, never inside quotes; backtick escapes honored)."""
+    q = None
+    k = 0
+    while k < len(line):
+        ch = line[k]
+        if ch == "`" and k + 1 < len(line):
+            k += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+        elif ch == ";" and (k == 0 or line[k - 1] in (" ", "\t")):
+            return line[:k]
+        k += 1
+    return line
+
+
+def _match_call(s: str):
+    """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
+    Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
+    kept as part of rest for the caller to decide."""
+    m = re.match(r'^\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(', s)
+    if not m:
+        return None
+    depth, q, k = 0, None, m.end() - 1
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            k += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return m.group(1), s[m.end():k], s[k + 1:].strip()
+        k += 1
+    return None
+
+
+def _split_seq(s: str) -> list:
+    """Split top-level comma-separated statements (AHK `a(), b()`)."""
+    parts, depth, q, cur = [], 0, None, ""
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            cur += s[k:k + 2]
+            k += 2
+            continue
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+            cur += ch
+        elif ch in "([":
+            depth += 1
+            cur += ch
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+            cur += ch
+        elif ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        k += 1
+    parts.append(cur)
+    return parts
+
+
+def _balanced_parens(s: str) -> bool:
+    depth, q = 0, None
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            k += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return False
+        k += 1
+    return depth == 0 and q is None
+
+
+def _split_top(s: str, op: str):
+    """Split on operator at depth 0 outside quotes (backtick-aware)."""
+    parts, depth, q, cur = [], 0, None, ""
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            cur += s[k:k + 2]
+            k += 2
+            continue
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+            cur += ch
+        elif ch in "([":
+            depth += 1
+            cur += ch
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+            cur += ch
+        elif depth == 0 and s.startswith(op, k):
+            parts.append(cur)
+            cur = ""
+            k += len(op)
+            continue
+        else:
+            cur += ch
+        k += 1
+    parts.append(cur)
+    return parts
+
+
 def parse_statement(line: str):
-    s = line.strip()
+    s = _strip_comment(line).strip()
     if not s or s.startswith(";"):
         return None
     low = s.lower()
-    if low in ("break", "break 1"):
-        return Break()
-    if low in ("continue"):
-        return Continue()
+    m = re.match(r'(?i)^(break|continue)(?:\s+(\d+))?$', s)
+    if m:
+        try:
+            lvl = int(m.group(2)) if m.group(2) else 1
+        except ValueError:
+            lvl = 1
+        return (Break(lvl) if m.group(1).lower() == "break" else Continue(lvl))
+    # AHK continuation-section text block opener: `(LTrim Join...` etc.
+    # After line-joining the whole block is one logical line; its content is
+    # literal text (MsgBox bodies, generated scripts), not executable code.
+    if re.match(r'^\((LTrim|RTrim|Join|Comments?)(?:\s|\)|,)', s, re.IGNORECASE):
+        return Setting("ContinuationSection", s[:60])
     # Send family: Send / SendInput / SendEvent / SendPlay / SendText
     for prefix in ("sendtext ", "sendinput ", "sendevent ", "sendplay ", "send "):
         if low.startswith(prefix):
-            return Send(_unquote(s[len(prefix):]))
+            rest = s[len(prefix):]
+            chunks = [c.strip() for c in _split_seq(rest)]
+            chunks = [c for c in chunks if c != ""]
+            if len(chunks) > 1:
+                items = []
+                items.append(Send(_unquote(chunks[0])))
+                for chunk in chunks[1:]:
+                    sub = parse_statement(chunk)
+                    if sub is not None:
+                        items.append(sub)
+                return Seq(items)
+            return Send(_unquote(rest))
     # bare Send("...") handled as FuncCall below; runtime maps it too.
-    m = re.match(r'(?i)^MouseClick\s*(.*)$', s)
+    m = re.match(r'(?i)^MouseClick(?!Drag)\s*(.*)$', s)
     if m:
         rest = m.group(1).strip()
         # MouseClick [, WhichButton, X, Y, ClickCount, ...] -> map to Click
@@ -197,17 +515,37 @@ def parse_statement(line: str):
         rest = m.group(1).strip()
         x = y = None
         button = "left"
-        nums = re.findall(r'-?\d+', rest)
+        count = 1
+        # coords may be literals or var/expr (kept raw, resolved at runtime)
+        parts = [p.strip() for p in rest.split(",")] if rest else []
+        nums = [p for p in parts if re.match(r'^-?\d+$', p)]
+        exprs = [p for p in parts if not re.match(r'^-?\d+$', p)
+                 and p.lower() not in ("left", "right", "middle")]
         if len(nums) >= 2:
             x, y = int(nums[0]), int(nums[1])
-        low = rest.lower()
+        elif len(exprs) >= 2:
+            x, y = exprs[0], exprs[1]
+        elif rest and not parts:
+            pass
+        if re.match(r'^[A-Za-z_]\w*$', rest):
+            return Click(None, None, button, count, opts=rest)
+        low2 = rest.lower()
         for b in ("right", "middle", "left"):
-            if b in low:
+            if b in low2:
                 button = b
-        return Click(x, y, button)
-    m = re.match(r'(?i)^mousemove\s+(-?\d+)\s*,\s*(-?\d+)', s)
+        return Click(x, y, button, count)
+    m = re.match(r'(?i)^mousemove\s+(.+)$', s)
     if m:
-        return MouseMove(int(m.group(1)), int(m.group(2)))
+        parts = [p.strip().split(";")[0].strip() for p in m.group(1).split(",")]
+        def _num_or_raw(p):
+            try:
+                return int(p)
+            except (ValueError, TypeError):
+                return p
+        x = _num_or_raw(parts[0]) if len(parts) > 0 else 0
+        y = _num_or_raw(parts[1]) if len(parts) > 1 else 0
+        spd = _num_or_raw(parts[2]) if len(parts) > 2 else None
+        return MouseMove(x, y, spd)
     m = re.match(r'(?i)^sleep\s+(.+)$', s)
     if m:
         raw_ms = m.group(1).strip().split(";")[0].strip()
@@ -216,6 +554,11 @@ def parse_statement(line: str):
             return Sleep(int(raw_ms))
         except ValueError:
             return Sleep(raw_ms)
+    m = re.match(r'(?i)^keywait\s*(.*)$', s)
+    if m:
+        parts = _parse_args(m.group(1))
+        return KeyWait(_unquote(parts[0]) if parts else "",
+                       _unquote(parts[1]) if len(parts) > 1 else "")
     m = re.match(r'(?i)^msgbox\s*(.*)$', s)
     if m:
         return MsgBox(_unquote(m.group(1)))
@@ -238,22 +581,148 @@ def parse_statement(line: str):
             except ValueError:
                 pass
         return PixelSearch(color=str(color), x1=box[0], y1=box[1], x2=box[2], y2=box[3])
+    m = re.match(r'(?i)^return\b\s*(.*)$', s)
+    if m:
+        val = m.group(1).split(";")[0].strip()
+        return Return(val if val else None)
+    m = DECL_RE.match(s)
+    if m:
+        names = [p.strip().lstrip("&").split(":=")[0].split("=")[0].strip()
+                 for p in m.group(2).split(",") if p.strip()]
+        return ScopeDecl(m.group(1).lower(), [x for x in names if x])
+    m = re.match(r'(?i)^iniwrite\s+(.*)$', s)
+    if m:
+        # _split_seq (not _parse_args): keeps quotes so runtime evals values
+        parts = [p.strip() for p in _split_seq(m.group(1))]
+        while len(parts) < 4:
+            parts.append("")
+        return IniOp("write", parts[0], parts[1],
+                     parts[2], parts[3].split()[0] if parts[3].split() else "")
+    m = re.match(r'(?i)^iniread\s+(.*)$', s)
+    if m:
+        parts = [p.strip() for p in _split_seq(m.group(1))]
+        while len(parts) < 4:
+            parts.append("")
+        return IniOp("read", parts[0], parts[1],
+                     parts[2], parts[3].split()[0] if parts[3].split() else "")
+    m = SETTING_RE.match(s)
+    if m:
+        return Setting(m.group(1), m.group(2).strip())
+    m = INCLUDE_RE.match(s)
+    if m:
+        return Include(_unquote(m.group(1).strip()))
+    m = LABEL_RE.match(s)
+    if m and m.group(1).lower() not in ("if", "else", "for", "while", "loop",
+                                        "switch", "case", "default", "try",
+                                        "catch", "finally", "return"):
+        # Gosub-style label: execution target only, skip at runtime.
+        return Setting("Label", m.group(1))
+    m = re.match(r'(?i)^throw\b\s*(.*)$', s)
+    if m:
+        val = m.group(1).strip()
+        return Throw(val if val else None)
+    m = re.match(r'(?i)^exitapp\b\s*(.*)$', s)
+    if m:
+        val = m.group(1).strip()
+        try:
+            return ExitApp(int(val) if val else 0)
+        except ValueError:
+            return ExitApp(val if val else 0)
+    m = re.match(r'^\s*([A-Za-z_]\w*)\s*(\+=|-=|\*=|//=|/=|\.=)\s*(.+)$', s)
+    if m:
+        return CompoundAssign(m.group(1), m.group(2), m.group(3).strip())
+    m = re.match(r'^\s*([A-Za-z_]\w*)\s*(\+\+|--)\s*$', s)
+    if m:
+        return IncDec(m.group(1), 1 if m.group(2) == "++" else -1)
+    m = re.match(r'^\s*(\+\+|--)\s*([A-Za-z_]\w*)\s*$', s)
+    if m:
+        return IncDec(m.group(2), 1 if m.group(1) == "++" else -1)
+    m = LEGACY_CMD_RE.match(s)
+    if m and not re.match(r'^\s*:?=', m.group(2)):
+        return LegacyCmd(m.group(1), m.group(2).strip())
+    # short-circuit statement forms: A && B / A || B, incl. N-ary chains
+    # (`IsSet(x) && ok && cleanup()` runs cleanup only if all hold).
+    # Skipped when the head is an assignment: `x := a && b` assigns the
+    # whole conjunction. (A trailing `&& x := v` guard-target is fine.)
+    for _op, _neg in (("||", True), ("&&", False)):
+        _parts = _split_top(s, _op)
+        if len(_parts) >= 2 and all(p.strip() for p in _parts) \
+                and len(_split_top(_parts[0], ":=")) == 1:
+            _codes = [_strip_comment(p).strip() for p in _parts]
+            if all(_codes):
+                _node = parse_statement(_codes[-1])
+                for _p in reversed(_codes[:-1]):
+                    _c = f"!({_p})" if _neg else _p
+                    _node = If(_c, [_node] if _node is not None else [])
+                return _node
+    # fully parenthesized statement: (stmt) -> inner
+    if s.startswith("(") and s.endswith(")") and _balanced_parens(s):
+        _inner = parse_statement(s[1:-1].strip())
+        if _inner is not None and not (
+                isinstance(_inner, FuncCall) and _inner.name == "__raw__"):
+            return _inner
     m = re.match(r'^\s*([A-Za-z_]\w*)\s*:=\s*(.+)$', s)
     if m:
         # Keep RAW expression for runtime eval (arithmetic, Random(), etc.).
         # Strip trailing comment.
         val = m.group(2).split(";")[0].strip()
         return Assign(m.group(1), val)
-    m = re.match(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*$', s)
-    if m:
-        return FuncCall(m.group(1), _parse_args(m.group(2)))
+    mc = _match_call(s)
+    if mc is not None:
+        name, argstr, rest = mc
+        # NOTE: _split_seq (not _parse_args): keeps quotes so runtime eval
+        # sees "str" vs identifier. All call args are evaluated at runtime.
+        raw_args = [p.strip() for p in _split_seq(argstr)] if argstr.strip() else []
+        raw_args = [p for p in raw_args if p != ""]
+        if rest.startswith("=>"):
+            # fat-arrow definition: Name(params) => expr
+            _params = []
+            for _a in _parse_args(argstr):
+                _seg = str(_a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
+                _seg = _seg.rstrip("?*").strip()
+                if _seg.split():
+                    _params.append(_seg.split()[0])
+            _expr = rest[2:].strip()
+            return FuncDef(name, _params, [Return(_expr if _expr else None)])
+        # dotted method chain glued to THIS call: `obj.M().N()` (rest starts
+        # with `.`). A `.` appearing later (`, obj.M()`) is a new statement,
+        # handled by the `,` branch below — never a chain.
+        if rest.startswith("."):
+            chained = re.findall(r'\.([A-Za-z_]\w*)\s*\(', rest)
+            if chained:
+                name = name + "+" + "+".join(chained)
+                rest = re.sub(r'(?:\.[A-Za-z_]\w*\s*\(.*\))+\s*$', '', rest, flags=re.DOTALL).strip()
+            if rest.startswith(","):
+                pass  # chain + more statements: fall into Seq below
+            elif rest:
+                return FuncCall("__raw__", [s])
+        if rest.startswith(","):
+            items = [FuncCall(name, raw_args)]
+            for chunk in _split_seq(rest[1:]):
+                sub = parse_statement(chunk.strip())
+                if sub is not None:
+                    items.append(sub)
+            if len(items) > 1:
+                return Seq(items)
+            return items[0]
+        if rest:
+            return FuncCall("__raw__", [s])
+        # plain + dotted calls (Obj.Method), balanced nested parens included
+        return FuncCall(name, raw_args)
+    m = re.match(r'^(.+?)\s*:=\s*(.+)$', s)
+    if m and ":=" not in m.group(1):
+        # complex targets: arr[i] := v, obj.prop := v (calls handled above)
+        return AssignTarget(m.group(1).strip(), m.group(2).split(";")[0].strip())
     return FuncCall("__raw__", [s])  # unknown -> logged, non-fatal
 
 
 def _parse_loop_count(raw: str | None):
     if raw is None:
         return None
-    raw = raw.strip()
+    raw = raw.strip().lstrip(",").strip()
+    # v1 legacy %var% deref
+    if len(raw) >= 2 and raw.startswith("%") and raw.endswith("%"):
+        raw = raw[1:-1]
     try:
         return int(raw)
     except ValueError:
@@ -261,8 +730,427 @@ def _parse_loop_count(raw: str | None):
         return raw
 
 
-def _parse_block(lines: list[str], i: int):
-    """Parse statements until `}` / `Return` / EOF. Returns (stmts, next_i)."""
+def _parse_single_or_block(lines: list[str], i: int):
+    """Body is either `{ ... }` or the single next statement.
+    Returns (body, next_i, self_closed): self_closed is True only when the
+    body consumed its own lone-`}` closer (matters for dangling-else)."""
+    n = len(lines)
+    while i < n and (not lines[i].strip() or lines[i].strip().startswith(";")):
+        i += 1
+    if i < n and lines[i].strip() == "{":
+        return _parse_block(lines, i + 1)
+    if i < n:
+        # `{ <stmt> ...` — brace and first statement share one line.
+        mo = re.match(r'^\{\s*(.+)$', _strip_comment(lines[i]).strip())
+        if mo:
+            first = parse_statement(mo.group(1))
+            rest, ni, closed = _parse_block(lines, i + 1)
+            return ([first] if first is not None else []) + rest, ni, closed
+        node, ni = _parse_case_statement(lines, i)
+        return ([node] if node is not None else [], ni, False)
+    return [], i, False
+
+
+def _skip_blank(lines: list[str], i: int) -> int:
+    """Next index holding real code (skips blanks and `;` comment lines).
+    Follower keywords (`else`, `catch`, `until`...) routinely sit behind
+    blank lines or `;` remarks in the wild."""
+    n = len(lines)
+    while i < n and (not lines[i].strip() or lines[i].strip().startswith(";")):
+        i += 1
+    return i
+
+
+def _parse_else_tail(lines: list[str], i: int, then_closed: bool = False):
+    """Consume `} Else If .. {`, `} Else {`, or bare `Else` (+ single stmt).
+    Returns (else_body, next_i). ElseIf chains recurse into If nodes.
+
+    then_closed: the then-body already consumed its own lone-`}` closer. A
+    `}`-led else line then closes the ENCLOSING block instead — it is not
+    ours (dangling-else). Bare `else` (no leading brace) still attaches."""
+    n = len(lines)
+    i = _skip_blank(lines, i)
+    if i >= n:
+        return [], i
+    code = _strip_comment(lines[i]).strip()
+    if then_closed and code.startswith("}"):
+        return [], i
+    m = ELSEIF_RE.match(code)
+    if m:
+        cond = m.group(1).strip()
+        then_body, i, closed = _body_after_opener(lines, i + 1, _has_brace(code))
+        tail, i = _parse_else_tail(lines, i, closed)
+        return [If(cond, then_body, tail)], i
+    if ELSE_RE.match(code):
+        return _parse_block(lines, i + 1)[:2]
+    # braceless `else if (cond)` + single statement (also `else if(`)
+    me = re.match(r'^\s*(?:\}\s*)?Else\s+If(?=\s|\()(.+?)\s*$', code, re.IGNORECASE)
+    if me and not _has_brace(code):
+        body, i, closed = _parse_single_or_block(lines, i + 1)
+        tail, i = _parse_else_tail(lines, i, closed)
+        return [If(me.group(1).strip(), body, tail)], i
+    # single-line `else <statement>` (not else-if): `else throw ...`
+    me2 = re.match(r'^\s*(?:\}\s*)?Else\s+(.+)$', code, re.IGNORECASE)
+    if me2 and not re.match(r'(?i)^\s*if\b', me2.group(1)) and not _has_brace(code):
+        st = parse_statement(me2.group(1))
+        return ([st] if st is not None else []), i + 1
+    s = code
+    if re.match(r'^\s*(?:\}\s*)?else\s*$', code, re.IGNORECASE):
+        body, ni, _ = _parse_single_or_block(lines, i + 1)
+        return body, ni
+    return [], i
+
+
+def _parse_switch(lines: list[str], i: int, value: str):
+    """After `Switch expr [{]`. Returns (Switch, next_i)."""
+    cases: list = []
+    cur_cond = None
+    cur_body: list = []
+    started = False
+    n = len(lines)
+    # Allman brace on the next line
+    while i < n and (not lines[i].strip() or lines[i].strip().startswith(";")):
+        i += 1
+    if i < n and lines[i].strip() == "{":
+        i += 1
+    while i < n:
+        raw = lines[i]
+        s = raw.strip()
+        if not s or s.startswith(";"):
+            i += 1
+            continue
+        if s == "}":
+            i += 1
+            break
+        code = _strip_comment(raw).strip()
+        mc = CASE_RE.match(code)
+        md = DEFAULT_RE.match(code)
+        if mc or md:
+            if started:
+                cases.append((cur_cond, cur_body))
+            cur_cond = mc.group(1).strip() if mc else None
+            cur_body = []
+            started = True
+            i += 1
+            continue
+        # nested structures inside case bodies: reuse statement parsing by
+        # delegating one compound at a time via _parse_block_chunks below.
+        sub, i = _parse_case_statement(lines, i)
+        if sub is not None:
+            cur_body.append(sub)
+    if started:
+        cases.append((cur_cond, cur_body))
+    return Switch(value, cases), i
+
+
+def _body_after_opener(lines: list[str], i: int, same_line_brace: bool):
+    """Body after an opener line: `{` consumed already (same_line_brace), or
+    `{` on the next line (Allman), or a single following statement.
+    Returns (body, next_i, self_closed)."""
+    if same_line_brace:
+        return _parse_block(lines, i)
+    return _parse_single_or_block(lines, i)
+
+
+def _has_brace(raw: str) -> bool:
+    return raw.rstrip().endswith("{") or re.search(r'\{\s*(;.*)?$', raw) is not None
+
+
+def _parse_case_statement(lines: list[str], i: int):
+    """Parse exactly one statement/compound starting at i (for switch bodies
+    and other nested contexts). Returns (node_or_None, next_i)."""
+    raw = lines[i]
+    # Block openers tolerate trailing `;` comments (very common in the wild:
+    # `loop 2 { ;Click tile`). Match against the comment-stripped form.
+    code = _strip_comment(raw).strip()
+    mf = FUNCDEF_RE.match(code)
+    if mf and mf.group(1).lower() not in _KEYWORDS:
+        params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
+        clean = []
+        for p in params:
+            p = p.lstrip("&").strip()
+            p = p.split(":=")[0].strip().split("=")[0].strip()
+            p = p.rstrip("?*").strip()
+            if p.split():
+                clean.append(p.split()[0])
+        body, i, _ = _parse_block(lines, i + 1)
+        return FuncDef(mf.group(1), clean, body), i
+    mc = CLASS_RE.match(code)
+    if mc:
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        return Class(mc.group(1), mc.group(2), body), i
+    mm = METHODDEF_RE.match(code)
+    if mm and mm.group(1).lower() not in _KEYWORDS:
+        params = [p.strip() for p in mm.group(2).split(",") if p.strip()]
+        clean = []
+        for p in params:
+            p = p.lstrip("&").strip()
+            p = p.split(":=")[0].strip().split("=")[0].strip()
+            p = p.rstrip("?*").strip()
+            if p.split():
+                clean.append(p.split()[0])
+        body, i, _ = _parse_block(lines, i + 1)
+        return FuncDef(mm.group(1), clean, body), i
+    # Allman method form: `Name(args)` / `static Name(args)` + `{` next line.
+    _mcode = re.sub(r'^(?:static|public|private)\s+', '', code, flags=re.IGNORECASE)
+    _mmc = _match_call(_mcode)
+    if _mmc is not None and not _mmc[2]:
+        _mname = _mmc[0].split(".")[-1]
+        if re.match(r'^[A-Za-z_]\w*$', _mname or "") and _mname.lower() not in _KEYWORDS:
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith(";")):
+                j += 1
+            if j < len(lines) and lines[j].strip() == "{":
+                _raw_args = [p.strip() for p in _split_seq(_mmc[1])] if _mmc[1].strip() else []
+                fn_params = []
+                for a in _raw_args:
+                    seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
+                    seg = seg.rstrip("?*").strip()
+                    if seg.split():
+                        fn_params.append(seg.split()[0])
+                body, k, _ = _parse_block(lines, j + 1)
+                return FuncDef(_mname, fn_params, body), k
+    ms = STATIC_ASSIGN_RE.match(code)
+    if ms:
+        st = parse_statement(ms.group(1))
+        return (st if st is not None else Setting("Static", ms.group(1))), i + 1
+    m = LOOPPARSE_RE.match(code)
+    if m:
+        return _parse_loopparse(lines, i, m)
+    m = LOOPFILES_RE.match(code)
+    if m:
+        rest = m.group(1).strip().lstrip(",").strip()
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        return LoopFiles(_unquote(rest), body), i
+    m = LOOP_RE.match(code)
+    if m and not re.match(r'(?i)^\s*Loop\s+Parse\b', code) \
+            and not re.match(r'(?i)^\s*Loop\s+Files\b', code):
+        # `Loop {` (infinite): the brace is structure, never a count. The
+        # greedy `(.+?)` would otherwise swallow `{` as the count.
+        cnt_raw = (m.group(1) or "").strip()
+        if cnt_raw in ("", "{"):
+            body, i, _ = _body_after_opener(lines, i + 1, True)
+            node = Loop(None, body)
+        else:
+            body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+            node = Loop(_parse_loop_count(cnt_raw), body)
+        # `loop { ... } until cond` (do-until): the block stopped at a
+        # `} until ...` follower instead of a bare `}`.
+        if node.count is None and i < len(lines):
+            i = _skip_blank(lines, i)
+            mu = UNTIL_RE.match(_strip_comment(lines[i]).strip()) if i < len(lines) else None
+            if mu:
+                node = DoUntil(mu.group(1).strip(), node.body)
+                i += 1
+        return node, i
+    m = LOOP_BARE_RE.match(code)
+    if m:
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        node = Loop(None, body)
+        if i < len(lines):
+            i = _skip_blank(lines, i)
+            mu = UNTIL_RE.match(_strip_comment(lines[i]).strip()) if i < len(lines) else None
+            if mu:
+                node = DoUntil(mu.group(1).strip(), node.body)
+                i += 1
+        return node, i
+    m = FOR_RE.match(code)
+    if m:
+        targets = [t.strip() for t in m.group(1).split(",") if t.strip()]
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        return For(targets, m.group(2).strip(), body), i
+    m = WHILE_RE.match(code)
+    if m:
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        return While(m.group(1).strip(), body), i
+    if DO_RE.match(code):
+        body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
+        cond = ""
+        if i < len(lines):
+            i = _skip_blank(lines, i)
+            mu = UNTIL_RE.match(_strip_comment(lines[i]).strip()) if i < len(lines) else None
+            if mu:
+                cond = mu.group(1).strip()
+                i += 1
+        return DoUntil(cond, body), i
+    m = IF_RE.match(code)
+    if m and _has_brace(code):
+        then_body, i, closed = _parse_block(lines, i + 1)
+        tail, i = _parse_else_tail(lines, i, closed)
+        return If(m.group(1).strip(), then_body, tail), i
+    m = IF_SINGLE_RE.match(code)
+    if m and not _has_brace(code):
+        body, i, closed = _parse_single_or_block(lines, i + 1)
+        tail, i = _parse_else_tail(lines, i, closed)
+        return If(m.group(1).strip(), body, tail), i
+    m = SWITCH_RE.match(code)
+    if m:
+        value = re.sub(r',\s*[01]\s*$', '', m.group(1).strip())
+        return _parse_switch(lines, i + 1, value)
+    if TRY_RE.match(code):
+        return _parse_try(lines, i, code)
+    # single-line `try <statement>` (TRY_RE only allows bare/brace forms).
+    # The statement may itself be a compound (`try switch x {`): parse it
+    # with full dispatch against the following lines. (A trailing `{` that
+    # belongs to the inner compound must not read as `Try {`.)
+    mt = re.match(r'(?i)^\s*Try\s+(.+)$', code)
+    if mt:
+        rest = mt.group(1).strip()
+        _compound_head = re.match(r'(?i)^\s*(if|loop|for|while|switch)\b', rest)
+        if _compound_head or not _has_brace(code):
+            sub, ni2 = _parse_case_statement([rest] + lines[i + 1:], 0)
+            stmts2 = [sub] if sub is not None else []
+            i = i + ni2  # rest + (ni2-1) following lines consumed
+        else:
+            st = parse_statement(rest)
+            stmts2 = [st] if st is not None else []
+            i += 1
+        catch_var, catch_body, finally_body, else_body = None, [], [], []
+        i = _skip_blank(lines, i)
+        if i < len(lines) and CATCH_RE.match(_strip_comment(lines[i])):
+            mc = CATCH_RE.match(_strip_comment(lines[i]))
+            catch_var = mc.group(1)
+            i += 1
+            catch_body, i, _ = _parse_single_or_block(lines, i)
+        else_body, i = _take_try_else(lines, i)
+        return Try(stmts2, catch_var, catch_body, finally_body, else_body), i
+    # `name :=` with empty value: expression continues on following lines
+    # (e.g. `movement :=` + Map/array literal block). Gather while unbalanced.
+    me = re.match(r'^\s*([A-Za-z_]\w*)\s*:=\s*$', code)
+    if me:
+        j = i + 1
+        n = len(lines)
+        while j < n and (not lines[j].strip() or lines[j].strip().startswith(";")):
+            j += 1
+        if j < n and lines[j].strip() not in ("{", "}") and not re.match(
+                r'(?i)^\s*(if|else|for|while|loop|switch|case|default|try|catch|finally|return|break|continue)\b', lines[j]):
+            parts = []
+            depth = 0
+            k = j
+            while k < min(n, j + 30):
+                ln = lines[k].strip()
+                if not ln or ln.startswith(";"):
+                    k += 1
+                    continue
+                parts.append(ln)
+                seg = re.sub(r'"[^"]*"|\'[^\']*\'', '', ln)
+                depth += seg.count("(") + seg.count("[") + seg.count("{")
+                depth -= seg.count(")") + seg.count("]") + seg.count("}")
+                k += 1
+                if depth <= 0 and not ln.rstrip().endswith((",", "+", "-", "*", "/", ".", "=", "|", "&", "?", "`")):
+                    break
+            if parts:
+                return Assign(me.group(1), " ".join(parts)), k
+        return Assign(me.group(1), ""), i + 1
+    st = parse_statement(raw)
+    if isinstance(st, FuncCall) and re.match(r'^[A-Za-z_]\w*$', st.name or ""):
+        # Allman function definition: `Name(args)` + `{` on the next line.
+        # (A bare call is never directly followed by a brace block in AHK.)
+        if st.name.lower() not in _KEYWORDS:
+            fn_params = []
+            for a in (st.args or []):
+                seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
+                seg = seg.rstrip("?*").strip()
+                if seg.split():
+                    fn_params.append(seg.split()[0])
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith(";")):
+                j += 1
+            if j < len(lines) and lines[j].strip() == "{":
+                body, k, _ = _parse_block(lines, j + 1)
+                # params from the def line: re-derive from raw call text
+                mc0 = _match_call(raw)
+                if mc0 is not None:
+                    fn_params = []
+                    for a in _parse_args(mc0[1]):
+                        seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
+                        seg = seg.rstrip("?*").strip()
+                        if seg.split():
+                            fn_params.append(seg.split()[0])
+                return FuncDef(st.name, fn_params, body), k
+    return st, i + 1
+
+
+def _parse_loopparse(lines: list[str], i: int, m):
+    rest = m.group(1).strip().lstrip(",").strip()
+    parts = _parse_args(rest)
+    text = parts[0] if len(parts) > 0 else ""
+    delims = _unquote(parts[1]) if len(parts) > 1 else ""
+    body, i, _ = _body_after_opener(lines, i + 1, _has_brace(lines[i]))
+    return LoopParse(text, delims, body), i
+
+
+def _take_try_else(lines: list[str], i: int):
+    """Consume a trailing try-`else` (runs when nothing threw): bare `else`
+    or `} else`, each with a `{...}` block or a single statement."""
+    n = len(lines)
+    i = _skip_blank(lines, i)
+    if i >= n:
+        return [], i
+    code = _strip_comment(lines[i]).strip()
+    # else-if is an If-else, never a try-else
+    if re.match(r'^\s*(?:\}\s*)?else\s+if\b', code, re.IGNORECASE):
+        return [], i
+    m = re.match(r'^\s*(?:\}\s*)?else\s*(\{\s*)?$', code, re.IGNORECASE)
+    if not m:
+        return [], i
+    i += 1
+    if m.group(1) or (i < n and lines[i].strip() == "{"):
+        if i < n and lines[i].strip() == "{":
+            i += 1
+        body, i, _ = _parse_block(lines, i)
+        return body, i
+    body, i, _ = _parse_single_or_block(lines, i)
+    return body, i
+
+
+def _parse_try(lines: list[str], i: int, raw: str):
+    n = len(lines)
+    code = _strip_comment(raw).strip()
+    if code.lower() == "try":
+        # bare `try` + single statement (no brace)
+        if i + 1 < n and lines[i + 1].strip() != "{":
+            try_body, i, _ = _parse_single_or_block(lines, i + 1)
+        elif i + 1 < n:
+            try_body, i, _ = _parse_block(lines, i + 2)
+        else:
+            try_body, i, _ = [], i + 1, False
+    else:
+        try_body, i, _ = _parse_block(lines, i + 1)
+    catch_var, catch_body, finally_body = None, [], []
+    i = _skip_blank(lines, i)
+    if i < n and CATCH_RE.match(_strip_comment(lines[i])):
+        mc = CATCH_RE.match(_strip_comment(lines[i]))
+        catch_var = mc.group(1)
+        has_brace = bool(mc.group(2))
+        i += 1
+        if has_brace:
+            catch_body, i, _ = _parse_block(lines, i)
+        else:
+            catch_body, i, _ = _parse_single_or_block(lines, i)
+    else_body, i = _take_try_else(lines, i)
+    i = _skip_blank(lines, i)
+    if i < n and FINALLY_RE.match(_strip_comment(lines[i])):
+        mf2 = FINALLY_RE.match(_strip_comment(lines[i]))
+        i += 1
+        if mf2.group(1):
+            finally_body, i, _ = _parse_block(lines, i)
+        else:
+            finally_body, i, _ = _parse_single_or_block(lines, i)
+    return Try(try_body, catch_var, catch_body, finally_body, else_body), i
+
+
+def _parse_block(lines: list[str], i: int, top: bool = False):
+    """Parse statements until `}` / EOF. Returns (stmts, next_i, self_closed).
+
+    self_closed is True only when the block consumed its own lone-`}` closer
+    (needed for dangling-else: a following `} else` then belongs outward).
+
+    `top=True` only for hotkey bodies and the auto-execute flow, where a
+    bare `return` ends the section (AHK semantics). Inside `{...}` blocks
+    (functions, If/Loop/Try bodies) `return` is an ordinary statement —
+    treating it as a terminator there leaks `}`/`else` and breaks every
+    switch/case below the leak."""
     stmts: list = []
     n = len(lines)
     while i < n:
@@ -271,58 +1159,34 @@ def _parse_block(lines: list[str], i: int):
         if not s or s.startswith(";"):
             i += 1
             continue
-        if s == "}" or s.lower() == "return":
-            return stmts, i + 1
-        # Else on its own line after a closed If-block is handled by the
-        # If-branch below (lookahead); a stray Else here closes this block.
-        if re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', s):
-            return stmts, i  # let caller consume Else
-        mf = FUNCDEF_RE.match(raw)
-        if mf:
-            params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
-            # strip & / default values: `&x, y := 1` -> x, y
-            clean = []
-            for p in params:
-                p = p.lstrip("&").strip()
-                p = p.split(":=")[0].strip().split("=")[0].strip()
-                clean.append(p.split()[0])
-            body, i = _parse_block(lines, i + 1)
-            stmts.append(FuncDef(mf.group(1), clean, body))
-            continue
-        m = LOOP_RE.match(raw)
-        if m:
-            cnt = _parse_loop_count(m.group(1))
-            body, i = _parse_block(lines, i + 1)
-            stmts.append(Loop(cnt, body))
-            continue
-        m = WHILE_RE.match(raw)
-        if m:
-            body, i = _parse_block(lines, i + 1)
-            stmts.append(While(m.group(1).strip(), body))
-            continue
-        m = IF_RE.match(raw)
-        if m:
-            cond = m.group(1).strip()
-            then_body, i = _parse_block(lines, i + 1)
-            else_body: list = []
-            # consume `} Else {` split across lines: _parse_block stopped
-            # BEFORE the Else line (returned i pointing at Else), or the
-            # closing brace was consumed and next line is `Else {`.
-            if i < n and re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', lines[i].strip()):
-                i += 1
-                else_body, i = _parse_block(lines, i)
-            stmts.append(If(cond, then_body, else_body))
-            continue
-        st = parse_statement(raw)
-        if st is not None:
-            stmts.append(st)
-        i += 1
-    return stmts, i
+        # Block-end followers belong to the enclosing If/Try/Switch/Loop caller.
+        # (`} Else` without a same-line brace is a follower too: the `{` or
+        # the single statement comes on the following lines.)
+        code = _strip_comment(raw).strip()
+        if s == "}" or code == "}":
+            return stmts, i + 1, True
+        mret = re.match(r'(?i)^return\b\s*(.*)$', s)
+        if mret and top:
+            val = mret.group(1).split(";")[0].strip()
+            stmts.append(Return(val if val else None))
+            return stmts, i + 1, False
+        if ELSEIF_RE.match(code) or ELSE_RE.match(code) or CATCH_RE.match(code) \
+                or FINALLY_RE.match(code) or CASE_RE.match(code) or DEFAULT_RE.match(code) \
+                or UNTIL_RE.match(code):
+            return stmts, i, False
+        if code.lower() == "else" or re.match(r'^\s*\}\s*else\s*$', code, re.IGNORECASE):
+            return stmts, i, False
+        node, i = _parse_case_statement(lines, i)
+        if node is not None:
+            # FuncDef at block level registers globally; keep node too so
+            # nested defs still execute (runtime re-registers, harmless).
+            stmts.append(node)
+    return stmts, i, False
 
 
 def parse_script(text: str) -> Script:
     sc = Script()
-    lines = text.splitlines()
+    lines = _join_continuations(text)
     # hoist #Requires
     for ln in lines:
         if ln.strip().lower().startswith("#requires"):
@@ -357,46 +1221,23 @@ def parse_script(text: str) -> Script:
                 i += 1
                 if i < n and lines[i].strip() == "{":
                     i += 1  # brace style: F1::\n{
-                body, i = _parse_block(lines, i + 1 - 1)
+                body, i, _ = _parse_block(lines, i + 1 - 1, top=True)
                 hk.body = body
             cur_hotkey = None
             continue
-        if s == "}" or s.lower() == "return":
+        if s == "}":
             i += 1
             continue
-        mf = FUNCDEF_RE.match(raw)
-        if mf:
-            params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
-            clean = []
-            for p in params:
-                p = p.lstrip("&").strip()
-                p = p.split(":=")[0].strip().split("=")[0].strip()
-                clean.append(p.split()[0])
-            body, i = _parse_block(lines, i + 1)
-            sc.functions[mf.group(1)] = FuncDef(mf.group(1), clean, body)
+        mret = re.match(r'(?i)^return\b\s*(.*)$', s)
+        if mret:
+            i += 1  # top-level return: end of auto-execute section
             continue
-        m = LOOP_RE.match(raw)
-        if m:
-            cnt = _parse_loop_count(m.group(1))
-            body, i = _parse_block(lines, i + 1)
-            sc.auto_section.append(Loop(cnt, body))
-            continue
-        m = WHILE_RE.match(raw)
-        if m:
-            body, i = _parse_block(lines, i + 1)
-            sc.auto_section.append(While(m.group(1).strip(), body))
-            continue
-        m = IF_RE.match(raw)
-        if m:
-            cond = m.group(1).strip()
-            # _parse_block handles the Else lookahead internally when the
-            # If is at block level; at top level replicate it here.
-            then_body, ni = _parse_block(lines, i + 1)
-            else_body: list = []
-            if ni < n and re.match(r'(?i)^(?:\}\s*)?else\s*\{\s*$', lines[ni].strip()):
-                ni += 1
-                else_body, ni = _parse_block(lines, ni)
-            sc.auto_section.append(If(cond, then_body, else_body))
+        node, ni = _parse_case_statement(lines, i)
+        if node is not None:
+            if isinstance(node, FuncDef):
+                sc.functions[node.name] = node
+            else:
+                sc.auto_section.append(node)
             i = ni
             continue
         st = parse_statement(raw)
@@ -404,3 +1245,196 @@ def parse_script(text: str) -> Script:
             sc.auto_section.append(st)
         i += 1
     return sc
+
+
+def _open_ends(s: str) -> bool:
+    """Continuation check on comment-stripped text. A `%` (or operator) inside
+    a trailing `;` comment — e.g. `;less or equal to 50%` — must never glue
+    the next line onto this one."""
+    return _ends_open(_strip_comment(s).strip())
+
+
+def _prev_open(prev: str) -> bool:
+    """Is the previous logical line an unfinished expression? True when it
+    ends open (trailing operator) or has unbalanced `(`/`[` (string-aware)."""
+    if _open_ends(prev):
+        return True
+    depth = 0
+    q = None
+    k = 0
+    while k < len(prev):
+        ch = prev[k]
+        if ch == "`" and k + 1 < len(prev):
+            k += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+        elif ch == ";":
+            break  # rest is a comment, not structure
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        k += 1
+    return depth > 0
+
+
+def _colon_continues(prev: str, ln: str) -> bool:
+    """Fresh `:` line continues a dangling multi-line ternary (`? a` / `: b`).
+    Never fires for hotstrings (`:*:x::`), `::` hotkeys, or case/default."""
+    s = ln.strip()
+    if not s.startswith(":") or s.startswith("::"):
+        return False
+    if HOTSTRING_RE.match(ln):
+        return False
+    if re.match(r'(?i)^\s*(case|default)\b', prev):
+        return False
+    qpos = prev.rfind("?")
+    if qpos < 0:
+        return False
+    # dangling when no `:` after the last `?` (ignoring `::`/`:=`/`?` ops)
+    tail = prev[qpos + 1:]
+    tail = re.sub(r'"[^"]*"|\'[^\']*\'', '', tail)
+    if re.search(r'::|:=', tail):
+        return False
+    return ":" not in tail
+
+
+def _join_continuations(text: str) -> list[str]:
+    """Merge AHK continuation lines: open parens/brackets across lines, lines
+    ending with an operator (`, + - * / . = | & ?`), and lines starting with
+    `.` / `,` (method chains / arg continuations). Brace blocks are NOT joined
+    (they are real block structure). Returns logical lines."""
+    out: list[str] = []
+    buf = ""
+    paren = brack = 0
+
+    def _strip_code(ln: str, q0=None) -> tuple:
+        # remove strings + line comment for structure scanning.
+        # AHK escapes with BACKTICK (`" `; `, `` `n): skip escaped pairs.
+        # Quote state carries across lines inside continuations (AHK joins
+        # continuation sections before parsing, so strings may span lines).
+        res, q = [], q0
+        k = 0
+        while k < len(ln):
+            ch = ln[k]
+            if ch == "`" and k + 1 < len(ln):
+                res.append("  ")
+                k += 2
+                continue
+            if q:
+                res.append(" ")
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+                res.append(" ")
+            elif ch == ";" and (k == 0 or ln[k - 1] in (" ", "\t")):
+                break
+            else:
+                res.append(ch)
+            k += 1
+        return "".join(res), q
+
+    cont_q = None
+    in_block_comment = False
+    for ln in text.splitlines():
+        s = ln.strip()
+        if in_block_comment:
+            if "*/" in s:
+                in_block_comment = False
+            continue
+        if s.startswith("/*"):
+            if "*/" not in s[len("/*"):]:
+                in_block_comment = True
+            continue
+        if not s or s.startswith(";"):
+            if buf and paren <= 0 and brack <= 0:
+                out.append(buf)
+                buf = ""
+                paren = brack = 0
+            if not buf:
+                out.append(ln)
+            continue
+        # Quote state carries across ALL lines: multi-line strings are legal
+        # (continuation sections), and balanced lines are unaffected by carry.
+        code, cont_q = _strip_code(s, cont_q)
+        if buf:
+            # continuing previous logical line
+            if s.startswith((")", "]")):
+                buf += " " + s
+            else:
+                buf += " " + s
+            paren += code.count("(") - code.count(")")
+            brack += code.count("[") - code.count("]")
+            if paren <= 0 and brack <= 0 and not _open_ends(buf):
+                out.append(buf)
+                buf = ""
+                paren = brack = 0
+            continue
+        paren = code.count("(") - code.count(")")
+        brack = code.count("[") - code.count("]")
+        # Fresh lines starting with `,` `.` `(` `[` are AHK continuations of
+        # the previous expression (arg lists, string concat, call chains) —
+        # but only when the previous logical line is actually open, so a
+        # stray line can never corrupt a neighboring statement.
+        # Fresh `:` lines (single colon, never `::`/hotstrings/case labels)
+        # continue a multi-line ternary whose `?` branch is still dangling.
+        if out and not buf:
+            lead = s[0]
+            if lead in (",", "."):
+                # A statement can never START with `,`/`.` in AHK — always
+                # an argument-list / string-concat continuation.
+                out[-1] = out[-1] + " " + s
+                continue
+            if s.startswith(("&&", "||")):
+                # Leading-operator continuation (`&&`/`||` first): same rule.
+                out[-1] = out[-1] + " " + s
+                continue
+            if lead in ("(", "[") and _prev_open(out[-1]):
+                out[-1] = out[-1] + " " + s
+                continue
+            if lead == ":" and _colon_continues(out[-1], ln):
+                out[-1] = out[-1] + " " + s
+                continue
+        if paren > 0 or brack > 0 or _open_ends(s):
+            buf = s
+            continue
+        out.append(ln)
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _ends_open(s: str) -> bool:
+    t = s.rstrip()
+    if not t:
+        return False
+    # explicit AHK continuation: lone backtick at end of line
+    if t.endswith("`") and not t.endswith("``"):
+        return True
+    if t.endswith(("++", "--")):
+        return False  # IncDec suffix, never a continuation
+    if t.endswith("%") and re.search(r"%[A-Za-z_]\w*%$", t):
+        return False  # v1 %var% deref ending, not modulo continuation
+    # trailing comma or operator -> continuation (but not `::`, `:=`, `==`)
+    if t.endswith(","):
+        return True
+    if t[-1:] in ("+", "-", "*", "/", ".", "=", "|", "&", "?", "^", "%"):
+        if t[-2:] in ("::", ":=", "==", "!=", "<=", ">="):
+            return False
+        return True
+    # trailing single `:` continues a dangling ternary (`cond ? a :` + `b`
+    # on the next line). `Case 1:` / labels / `::` / `:=` never continue.
+    if t.endswith(":") and not t.endswith("::") and ":=" not in t[-3:]:
+        no_str = re.sub(r'"[^"]*"|\'[^\']*\'', '', t)
+        qpos = no_str.rfind("?")
+        if qpos >= 0 and ":" not in no_str[qpos + 1:]:
+            return True
+        return False
+    if t.endswith("(") or t.endswith("["):
+        return True
+    return False
