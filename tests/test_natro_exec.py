@@ -284,3 +284,18 @@ def test_bare_index_read_probe():
     assert type(sc.auto_section[2].try_body[0]).__name__ == "ExprStmt"
     rt.run_auto()
     assert rt.vars["k"] == "k"
+
+
+def test_dyncall_expression_callee():
+    # `(%"nm_" i%)()` main-loop dispatch: head resolves, callee runs.
+    t = ('nm_1() {\nSend "one"\n}\n'
+         'priorityList := [1]\nfor i in priorityList\n(%"nm_" i%)()\n')
+    sc, rt, sim = run(t)
+    assert type(sc.auto_section[1]).__name__ == "For"
+    assert type(sc.auto_section[1].body[0]).__name__ == "DynCall"
+    rt.run_auto()
+    assert types(sim) == ["one"]  # `nm_1` resolved from `i` and executed
+    # unknown target: logged, no crash.
+    _, rt2, _ = run('i := 9\n(%"nm_" i%)()\n')
+    rt2.run_auto()
+    assert any("stub builtin nm_9" in e for e in rt2.logs)

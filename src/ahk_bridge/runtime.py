@@ -267,6 +267,13 @@ class Runtime:
             self.vars[st.name] = self._eval_expr(st.value)
         elif isinstance(st, P.AssignTarget):
             self._assign_target(st.target, st.value)
+        elif isinstance(st, P.DynCall):
+            # main-loop dispatch: head evaluates to a function name.
+            name = self._resolve_call_name(st.head)
+            if not name:
+                self.logs.append(f"dyncall {st.head[:60]!r} unresolvable (logged)")
+            else:
+                self._call_value(P.FuncCall(name, st.args))
         elif isinstance(st, P.ExprStmt):
             # Ternary dispatch: evaluate branches for side effects, drop
             # the value (AHK v2 expression-statement semantics). Control
@@ -750,6 +757,36 @@ class Runtime:
             self.logs.append(f"PixelSearch error: {e}")
 
     # -- structured statements (v0.3) --
+    def _resolve_call_name(self, head: str) -> str:
+        """Evaluate an expression callee to a plain function name.
+        `(%"nm_" i%)` strips the outer `%...%` and concatenates the
+        juxtaposed `"str"` / var parts (`nm_` + i). Returns "" unless the
+        result is a valid bare name."""
+        h = str(head).strip()
+        if len(h) >= 2 and h.startswith("%") and h.endswith("%"):
+            h = h[1:-1]
+        for _ in range(10):  # embedded %var% segments first
+            dm = re.search(r"%([A-Za-z_]\w*)%", h)
+            if not dm:
+                break
+            h = h[:dm.start()] + str(self.vars.get(dm.group(1), "")) + h[dm.end():]
+        parts = self._split_juxta(h)
+        if not parts:
+            return ""
+        out = []
+        for quoted, body in parts:
+            body = body.strip()
+            if quoted:
+                out.append(self._interp(body))
+            elif body in self.vars:
+                out.append(str(self.vars[body]))
+            elif re.fullmatch(r"[A-Za-z_]\w*|\d+", body):
+                out.append(body)
+            else:
+                return ""
+        name = "".join(out)
+        return name if re.fullmatch(r"[A-Za-z_]\w*", name) else ""
+
     def _assign_target(self, target: str, value):
         """Indexed/property assignment: arr[i] := v, a[i][k] := v, obj.p := v."""
         val = self._eval_expr(value)

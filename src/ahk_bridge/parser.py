@@ -247,6 +247,14 @@ class ExprStmt:
     Evaluated and discarded (AHK v2 expression-statement semantics)."""
     expr: str
 
+
+@dataclass
+class DynCall:
+    """Expression callee: `(%"nm_" i%)()` — head evaluates to a function
+    name (main-loop dispatch over priorityList)."""
+    head: str
+    args: list
+
 @dataclass
 class FuncDef:
     name: str
@@ -478,6 +486,30 @@ def _match_call(s: str):
     if after < 0:
         return None
     return head, s[paren + 1:after - 1], s[after:].strip()
+
+
+def _match_dyncall(s: str):
+    """Expression callee `(head_expr)(args)` with balanced groups, or None.
+    `(cond) ? a : b` / `(a)+(b)` do not match (tail must open with `(` and
+    close at the end). Linear scans only."""
+    st = s.strip()
+    if not st.startswith("("):
+        return None
+    head_end = _scan_balanced(st, 0, "(", ")")
+    if head_end < 0:
+        return None
+    rest = st[head_end:].strip()
+    if not rest.startswith("("):
+        return None
+    args_end = _scan_balanced(rest, 0, "(", ")")
+    if args_end < 0 or rest[args_end:].strip() != "":
+        return None
+    head = st[1:head_end - 1].strip()
+    if not head:
+        return None
+    argstr = rest[1:args_end - 1]
+    args = [p.strip() for p in _split_seq(argstr)] if argstr.strip() else []
+    return head, [p for p in args if p != ""]
 
 
 def _scan_chain(rest: str):
@@ -893,6 +925,10 @@ def parse_statement(line: str):
     if m and ":=" not in m.group(1):
         # complex targets: arr[i] := v, obj.prop := v (calls handled above)
         return AssignTarget(m.group(1).strip(), m.group(2).split(";")[0].strip())
+    # expression callee: `(%"nm_" i%)()` main-loop dispatch.
+    dc = _match_dyncall(s)
+    if dc is not None:
+        return DynCall(dc[0], dc[1])
     return FuncCall("__raw__", [s])  # unknown -> logged, non-fatal
 
 
