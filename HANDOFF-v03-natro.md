@@ -17,7 +17,7 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **80 passed** (was 30 at v0.2.3; +F13, +2 dynamic-assign, +2 ternary, +5 call-head, +2 object-literal tests 2026-10-16).
+- `python3 -m pytest -q` → **84 passed** (was 30 at v0.2.3; session adds: F13, dynamic-assign ×2, ternary ×2, call-head ×5, object-literal ×2, Format, RegEx ×2, `\R` unit).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
   `__raw__` unknowns = 1.71%** (session start ~13% + 6 crashes; v0.3 §6
   close 417/1.88%).
@@ -128,6 +128,17 @@ Parser (`src/ahk_bridge/parser.py`):
     its live `case RobloxTypes.UWP:` dispatch. `Download url, (...)`
     left on purpose: undefined function + v2-invalid command syntax
     (dead upstream too).
+29. `Format(fmt, ...)` (14 corpus uses): `{n:spec}`/`{}` placeholders,
+    Python mini-language mapping (`02x`, `#x`, `03X`, `.2f`), AHK case
+    flags incl. LEADING position (`{1:Us}` = Upper+string — first attempt
+    only stripped trailing flags and returned lowercase; tests caught
+    it). Unknown specs → plain string, never throws.
+30. `RegExMatch(hay, pat [, &out, start])` (31 uses) → 1-based pos/0,
+    `i)/m)/s)` prefixes (same convention as `~=`), `\R` → newline
+    group (Python has none); `&out` gets the match STRING (AHK fills an
+    object — documented approximation). `RegExReplace` (9 uses) with
+    `$1`→`\1`, `$0`→whole-match, count support. (Runtime-only fix:
+    corpus parse counts unchanged by construction.)
 
 Runtime (`src/ahk_bridge/runtime.py`):
 24. `||`/`&&` inside EXPRESSIONS (`both := (...) || (...)`) → 1/0 via

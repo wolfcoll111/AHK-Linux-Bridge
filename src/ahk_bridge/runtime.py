@@ -429,6 +429,12 @@ class Runtime:
             if low == "strreplace" and len(args) >= 2:
                 return str(ev(args[0])).replace(str(ev(args[1])),
                                                 str(ev(args[2])) if len(args) > 2 else "")
+            if low == "format" and args:
+                return self._format_builtin([ev(a) for a in args])
+            if low == "regexmatch" and len(args) >= 2:
+                return self._regex_match(args, ev)
+            if low == "regexreplace" and len(args) >= 2:
+                return self._regex_replace([ev(a) for a in args])
             if low in ("trim", "ltrim", "rtrim") and args:
                 s = str(ev(args[0]))
                 return s.strip() if low == "trim" else (s.lstrip() if low == "ltrim" else s.rstrip())
@@ -504,6 +510,127 @@ class Runtime:
             self._stub_warned.add(low)
             self.logs.append(f"stub builtin {low}() -> falsy (GUI/OS gap)")
         return ""
+
+    @staticmethod
+    def _ahk_regex(pat: str):
+        """AHK pattern -> (body, flags): leading `i)`/`m)`/`s)` option
+        block (same convention as `~=`), backslash-R newline class (Python
+        has no equivalent). Scoped `(?i:...)` groups pass through natively."""
+        import re as _re
+        flags = 0
+        mo = _re.match(r"^([a-zA-Z]+)\)(.*)$", pat, _re.DOTALL)
+        if mo:
+            opts = mo.group(1).lower()
+            if "i" in opts:
+                flags |= _re.IGNORECASE
+            if "m" in opts:
+                flags |= _re.MULTILINE
+            if "s" in opts:
+                flags |= _re.DOTALL
+            pat = mo.group(2)
+        return pat.replace("\\R", r"(?:\r\n|\r|\n)"), flags
+
+    @staticmethod
+    def _format_one(spec: str, val):
+        """One `{n:spec}` substitution. Leading/trailing U/T/L is an AHK
+        case flag (`{1:Us}`, `{1:U}`); the rest maps onto Python's format
+        mini-language (`02x`, `#x`, `03X`, `s`, `d`, `.2f` ...). Unknown
+        specs fall back to the plain string (never throws)."""
+        case = None
+        if len(spec) > 1 and spec[0] in ("U", "T", "L"):
+            case, spec = spec[0], spec[1:]
+        elif spec and spec[-1] in ("U", "T", "L"):
+            case, spec = spec[-1], spec[:-1]
+        if spec == "c":
+            try:
+                out = chr(int(val))
+            except (TypeError, ValueError):
+                out = str(val)
+        elif not spec:
+            out = str(val)
+        else:
+            try:
+                out = ("{0:" + spec + "}").format(val)
+            except (TypeError, ValueError):
+                try:
+                    out = ("{0:" + spec + "}").format(
+                        int(val) if isinstance(val, bool) or
+                        (isinstance(val, str) and re.fullmatch(r"[+-]?\d+", val.strip()))
+                        else float(val))
+                except (TypeError, ValueError):
+                    out = str(val)
+        if case == "U":
+            return out.upper()
+        if case == "L":
+            return out.lower()
+        if case == "T":
+            return out.title()
+        return out
+
+    def _format_builtin(self, vals: list):
+        """`Format(fmt, v1, ...)` with `{n:spec}` / `{}` placeholders
+        (1-based explicit, sequential empty). Out-of-range indexes stay
+        literal (AHK would throw; the bridge keeps running)."""
+        if not vals:
+            return ""
+        fmt, auto = str(vals[0]), [0]
+
+        def _sub(m):
+            idx, spec = m.group(1), m.group(2) or ""
+            if idx == "":
+                auto[0] += 1
+                k = auto[0]
+            else:
+                k = int(idx)
+            if 1 <= k < len(vals):
+                return self._format_one(spec, vals[k])
+            return m.group(0)
+
+        try:
+            return re.sub(r"\{(\d*)(?::([^}]*))?\}", _sub, fmt)
+        except Exception:
+            return fmt
+
+    def _regex_match(self, args: list, ev):
+        """`RegExMatch(hay, pat [, &out, start])` -> 1-based pos or 0.
+        `&out` receives the full match STRING (AHK fills a match object;
+        documented approximation)."""
+        import re as _re
+        hay = str(ev(args[0]))
+        body, flags = self._ahk_regex(str(ev(args[1])))
+        try:
+            start = int(ev(args[3])) if len(args) > 3 else 1
+        except (TypeError, ValueError):
+            start = 1
+        start = max(1, start)
+        try:
+            m = _re.search(body, hay[start - 1:], flags)
+        except _re.error:
+            m = None
+        if len(args) > 2:
+            _on = str(args[2]).strip()
+            if _on.startswith("&") and re.fullmatch(r"&[A-Za-z_]\w*", _on):
+                self.vars[_on[1:]] = m.group(0) if m else ""
+        return (start - 1) + m.start() + 1 if m else 0
+
+    def _regex_replace(self, vals: list):
+        """`RegExReplace(hay, pat, repl [, count])`: `$1` backrefs become
+        Python `\\1`, `$0` the whole match; count 0/omitted = replace all."""
+        import re as _re
+        hay = str(vals[0])
+        body, flags = self._ahk_regex(str(vals[1]))
+        repl = str(vals[2]) if len(vals) > 2 else ""
+        repl = _re.sub(r"\$(\d+)",
+                       lambda m: r"\g<0>" if m.group(1) == "0" else "\\" + m.group(1),
+                       repl)
+        try:
+            count = int(vals[3]) if len(vals) > 3 else 0
+        except (TypeError, ValueError):
+            count = 0
+        try:
+            return _re.sub(body, repl, hay, count=count, flags=flags)
+        except _re.error:
+            return hay
 
     # -- Send with {Key} sequences --
     def _send_eval(self, text: str):

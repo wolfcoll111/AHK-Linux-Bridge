@@ -321,3 +321,56 @@ def test_object_literal_multiline():
     rt.run_auto()
     assert rt.vars["t"] == "Web Version"
     assert types(sim) == ["Web Version"]
+
+
+def test_format_builtin_oracle():
+    # Oracle: Python's own format for the mapped specs; AHK case flags.
+    _, rt, _ = run('a := Format("0x{1:02x}{2:02x}{3:02x}", 255, 1, 16)\n'
+                   'b := Format("{1:Us}", "abc")\n'
+                   'c := Format("{1:#x}", 255)\n'
+                   'd := Format("sc{:03X}", 26)\n'
+                   'e := Format("{1} and {2}", "x", "y")\n')
+    rt.run_auto()
+    assert rt.vars["a"] == "0x{:02x}{:02x}{:02x}".format(255, 1, 16)
+    assert rt.vars["a"] == "0xff0110"
+    assert rt.vars["b"] == "ABC"
+    assert rt.vars["c"] == "{:#x}".format(255) == "0xff"
+    assert rt.vars["d"] == "sc{:03X}".format(26) == "sc01A"
+    assert rt.vars["e"] == "x and y"
+
+
+def test_regex_match_replace_oracle():
+    # Oracle: positions/backrefs checked against Python re directly.
+    import re as _re
+    assert _re.search(r"\d+", "abc123").start() + 1 == 4
+    assert _re.sub(r"(\d+)-(\d+)-(\d+)", r"\3/\2/\1", "2026-10-16") == "16/10/2026"
+    t = ('p := RegExMatch("abc123", "\\d+")\n'
+         'q := RegExMatch("ABC", "i)abc")\n'
+         'z := RegExMatch("abc", "\\d+")\n'
+         'r := RegExReplace("abc123", "\\d+", "#")\n'
+         's := RegExReplace("2026-10-16", "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1")\n')
+    _, rt, _ = run(t)
+    rt.run_auto()
+    assert (rt.vars["p"], rt.vars["q"], rt.vars["z"]) == (4, 1, 0)
+    assert rt.vars["r"] == "abc#"
+    assert rt.vars["s"] == "16/10/2026"
+
+
+def test_ahk_regex_newline_class():
+    # `\R` has no Python equivalent: translated to a newline group.
+    # Verified at the translation unit + against a real newline, since
+    # AHK-quoted test sources cannot easily carry literal newlines.
+    import re as _re
+    from ahk_bridge import runtime as R
+    body, flags = R.Runtime._ahk_regex("\\R+")
+    assert "\\R" not in body
+    assert _re.search(body, "a\r\nb") is not None
+    assert _re.sub(body, "-", "a\nb") == "a-b"
+
+
+def test_regex_match_out_var():
+    # `&out` receives the match (string approx of AHK's match object).
+    _, rt, _ = run('p := RegExMatch("abc123", "(\\d+)", &m)\n')
+    rt.run_auto()
+    assert rt.vars["p"] == 4
+    assert rt.vars["m"] == "123"
