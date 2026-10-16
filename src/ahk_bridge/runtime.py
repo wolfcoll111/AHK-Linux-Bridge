@@ -268,22 +268,32 @@ class Runtime:
         elif isinstance(st, P.AssignTarget):
             self._assign_target(st.target, st.value)
         elif isinstance(st, P.CompoundAssign):
-            cur = self.vars.get(st.name, 0)
+            name = st.name
+            # v1 dynamic segments: hour_%status%_time, %j%_time
+            for _ in range(10):
+                dm = re.search(r"%([A-Za-z_]\w*)%", name)
+                if not dm:
+                    break
+                name = name[:dm.start()] + str(self.vars.get(dm.group(1), "")) + name[dm.end():]
+            cur = self.vars.get(name, 0)
             val = self._eval_expr(st.value)
             try:
                 if st.op == "+=":
-                    self.vars[st.name] = self._numval(cur) + self._numval(val)
+                    self.vars[name] = self._numval(cur) + self._numval(val)
                 elif st.op == "-=":
-                    self.vars[st.name] = self._numval(cur) - self._numval(val)
+                    self.vars[name] = self._numval(cur) - self._numval(val)
                 elif st.op == "*=":
-                    self.vars[st.name] = self._numval(cur) * self._numval(val)
+                    self.vars[name] = self._numval(cur) * self._numval(val)
                 elif st.op in ("//=", "/="):
                     d = self._numval(val)
-                    self.vars[st.name] = (self._numval(cur) // d) if st.op == "//=" else (self._numval(cur) / d)
+                    self.vars[name] = (self._numval(cur) // d) if st.op == "//=" else (self._numval(cur) / d)
                 elif st.op == ".=":
-                    self.vars[st.name] = str(cur) + str(val)
+                    self.vars[name] = str(cur) + str(val)
+                elif st.op in ("|=", "&="):
+                    a, b = int(self._numval(cur)), int(self._numval(val))
+                    self.vars[name] = (a | b) if st.op == "|=" else (a & b)
             except (TypeError, ValueError, ZeroDivisionError):
-                self.vars[st.name] = val if st.op == ".=" else cur
+                self.vars[name] = val if st.op == ".=" else cur
         elif isinstance(st, P.IncDec):
             try:
                 self.vars[st.name] = self._numval(self.vars.get(st.name, 0)) + st.delta

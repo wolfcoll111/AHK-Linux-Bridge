@@ -17,9 +17,10 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **69 passed** (was 30 at v0.2.3; +1 F13 regression test 2026-10-16).
-- Natro corpus: **150 files, 0 crashes, 524 functions, 22136 nodes, 417
-  `__raw__` unknowns = 1.88%** (started this session at ~13% + 6 crashes).
+- `python3 -m pytest -q` → **71 passed** (was 30 at v0.2.3; +F13 test, +2 dynamic-assign tests 2026-10-16).
+- Natro corpus: **150 files, 0 crashes, 524 functions, 22136 nodes, 410
+  `__raw__` unknowns = 1.85%** (session start ~13% + 6 crashes; v0.3 §6
+  close 417/1.88%).
 - `ahk-bridge check` → `detected_backend: uinput` on this machine.
 - Uncommitted at handoff time: NOTHING (everything below is committed).
 
@@ -83,6 +84,13 @@ Parser (`src/ahk_bridge/parser.py`):
     `#NoTrayIcon|#NoEnv|#Persistent|...` → `Setting`; `(LTrim...` text-block
     openers → `Setting("ContinuationSection")`.
 23. `MouseClick(?!Drag)` lookahead (was eating MouseClickDrag).
+24. v1 dynamic `%var%` segments in compound targets
+    (`hour_%status%_time += m-i`, `PlanterHarvestTime%A_Index% += ...`)
+    + bitwise `|=`/`&=` (7 raws fixed). REGEX WARNING: the first attempt
+    used a nested `(?:Name|%Name%)+` group and hung the recount
+    (3.4s on ONE 73-char line — exponential backtracking). Fix uses a
+    flat `[A-Za-z_%][\w%]*` match + linear `_is_dyn_target` scan.
+    Runtime derefs `%var%` in CompoundAssign names; `|=`/`&=` via ints.
 
 Runtime (`src/ahk_bridge/runtime.py`):
 24. `||`/`&&` inside EXPRESSIONS (`both := (...) || (...)`) → 1/0 via

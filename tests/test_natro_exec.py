@@ -193,3 +193,26 @@ def test_send_f13_taps_key_not_literal():
     keys = [e[1] for e in sim.log if e[0] == "key"]
     assert keys == ["F13"]
     assert types(sim) == []
+
+
+def test_compound_assign_dynamic_name_and_bitops():
+    # Verbatim shapes from StatMonitor.ahk + Gdip_All.ahk: v1 `%var%`
+    # segments in += targets, bitwise |= / &=.
+    _, rt, _ = run('status := "a"\nhour_a_time := 10\nm := 5\ni := 1\n'
+                   'hour_%status%_time += m - i\n'
+                   'Style := 3\nStyle |= 8\nStyle &= 7\n')
+    rt.run_auto()
+    assert rt.vars["hour_a_time"] == 14
+    assert rt.vars["Style"] == (3 | 8) & 7
+    _, rt2, _ = run('j := "q"\nq_time := 1\nhour_q_time := 20\n'
+                    '%j%_time += hour_%j%_time\n')
+    rt2.run_auto()
+    assert rt2.vars["q_time"] == 21
+
+
+def test_compound_assign_dynamic_name_ternary_value():
+    # PlanterTimers.ahk shape: dynamic target, ternary value.
+    _, rt, _ = run('i := 1\nc := "Sub"\nBlenderAmount1 := 5\n'
+                   'BlenderAmount%i% += (c = "Sub") ? -1 : 1\n')
+    rt.run_auto()
+    assert rt.vars["BlenderAmount1"] == 4

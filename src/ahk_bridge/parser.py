@@ -340,6 +340,31 @@ def _strip_comment(line: str) -> str:
     return line
 
 
+def _is_dyn_target(t: str) -> bool:
+    """Linear check: target is `Name` / `%Name%` segments glued together
+    (`hour_%status%_time`, `%j%_time`, `Style`). Each branch consumes at
+    least one char with no ambiguity, so no backtracking blowup."""
+    if not t:
+        return False
+    k, n = 0, len(t)
+    while k < n:
+        ch = t[k]
+        if ch == "%":
+            j = t.find("%", k + 1)
+            if j < 0:
+                return False
+            if not re.fullmatch(r"[A-Za-z_]\w*", t[k + 1:j]):
+                return False
+            k = j + 1
+        elif ch.isalpha() or ch == "_":
+            k += 1
+            while k < n and (t[k].isalnum() or t[k] == "_"):
+                k += 1
+        else:
+            return False
+    return True
+
+
 def _match_call(s: str):
     """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
     Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
@@ -628,8 +653,15 @@ def parse_statement(line: str):
             return ExitApp(int(val) if val else 0)
         except ValueError:
             return ExitApp(val if val else 0)
-    m = re.match(r'^\s*([A-Za-z_]\w*)\s*(\+=|-=|\*=|//=|/=|\.=)\s*(.+)$', s)
-    if m:
+    # Compound assignment, incl. v1 dynamic `%var%` segments in the target
+    # (`hour_%status%_time += m-i`, `PlanterHarvestTime%A_Index% += ...`)
+    # and bitwise `|=` / `&=` (`Style |= 8` in Gdip text rendering).
+    # NOTE: the target match below is deliberately a flat char class —
+    # a nested `(?:Name|%Name%)+` group backtracks catastrophically on
+    # long lines (3.4s on 73 chars, measured). Structure is validated
+    # by the linear scan in _is_dyn_target.
+    m = re.match(r'^\s*([A-Za-z_%][\w%]*)\s*(\+=|-=|\*=|//=|/=|\.=|\|=|&=)\s*(.+)$', s)
+    if m and _is_dyn_target(m.group(1)):
         return CompoundAssign(m.group(1), m.group(2), m.group(3).strip())
     m = re.match(r'^\s*([A-Za-z_]\w*)\s*(\+\+|--)\s*$', s)
     if m:
