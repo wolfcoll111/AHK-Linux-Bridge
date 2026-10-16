@@ -17,7 +17,7 @@ by execution (not just parsing), keep the suite green.
 
 ## 2. Current state (measured 2026-10-16, KDE Plasma 6.7.5 / Wayland)
 
-- `python3 -m pytest -q` → **68 passed** (was 30 at v0.2.3).
+- `python3 -m pytest -q` → **69 passed** (was 30 at v0.2.3; +1 F13 regression test 2026-10-16).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22136 nodes, 417
   `__raw__` unknowns = 1.88%** (started this session at ~13% + 6 crashes).
 - `ahk-bridge check` → `detected_backend: uinput` on this machine.
@@ -103,8 +103,13 @@ Proof (execution, not just parse — `tests/test_natro_exec.py`, 20 tests):
 - Planter time math verbatim from Status.ahk → `time_delta == 1801` ✓
 - Movespeed guard → matches Python oracle ✓, `60**(2-1) == 60` ✓
 - Do-until / try-catch-else both directions / break-2 / class statics ✓
-- Live uinput on KDE: device opens, keys send (xev proof PENDING re-run —
-  see §5.1).
+- Live uinput on KDE: device opens, keys send — **§5.1 PROVEN 2026-10-16**
+  (keycode 191 press+release in xev AND key 191 press+release in native
+  Wayland `wev`; see §5.1 log note for the keysym correction).
+- F13–F24 were missing from runtime `_SPECIAL_KEYS`, so `{F13}` typed
+  literally (xev showed braceleft/F/1/3). Fix: extended the map
+  (runtime.py); regression test `test_send_f13_taps_key_not_literal`.
+  Backend already mapped f1..f24 (`KEY_ALIASES`), no change needed there.
 
 ## 4. Remaining gaps (ranked, honest)
 
@@ -176,34 +181,63 @@ print(dict(raws.most_common(16)))
 # baseline 2026-10-16: funcs=524 nodes=22136 raw=417 (1.88%), 0 crashes
 ```
 
-### 5.1 Live uinput proof (KDE) — INTERRUPTED, redo this first
+### 5.1 Live uinput proof (KDE) — PROVEN 2026-10-16 (read this, don't re-run blind)
 
+Result: `Send "{F13}"` via `--backend uinput` delivers a real hardware
+scancode: xev shows `KeyPress/KeyRelease keycode 191`, native Wayland
+`wev` shows `key: 191 pressed/released` (evdev `KEY_F13`=183, +8 = 191 —
+correct). Focus held stable, no literal text after the `_SPECIAL_KEYS`
+fix. Proof logs: `/tmp/opencode/xev-uinput-f13-proof.log`,
+`/tmp/opencode/wev-uinput-f13-proof.log`.
+
+KEYSYM CORRECTION (was "want keysym 0xffca"): this box's live keymap
+(`xkbcomp :0` dump) binds `key <FK13> { [ XF86Tools ] }` (`inet` overlay,
+`symbols/inet:197`), so hardware F13 arrives as `XF86Tools (0x1008ff81)`
+here — a physical F13 keyboard would show the same. `0xffca` appears only
+via XTest synthesis (`xdotool key F13` remaps spare keycode 8 and fakes
+the keysym; log: `/tmp/opencode/xev-xtest-f13-oracle.log`), which does
+NOT reach Wayland-native clients. Keycode 191 press+release on the
+focused client is the correct proof on this machine; do not chase 0xffca
+without a custom keymap (out of scope).
+
+Rerun procedure (note the pkill footgun: NEVER put `pkill` and a literal
+`xev` path in the SAME `bash -c` line — pkill matches its own parent
+shell and SIGTERMs it; run the kill and the start as separate commands,
+or `kill <pid>` directly):
 ```bash
-pkill -f "[x]ev -event" 2>/dev/null   # NOTE brackets: plain "xev" matches YOUR OWN shell and kills it
 rm -f /tmp/opencode/xev-kde2.log
-DISPLAY=:0 setsid -f xev -event keyboard > /tmp/opencode/xev-kde2.log 2>&1
+DISPLAY=:0 setsid -f /usr/bin/xev -event keyboard > /tmp/opencode/xev-kde2.log 2>&1
 sleep 2
 export DISPLAY=:0
 XW=$(xdotool search --name "Event Tester" | tail -1)
 xdotool windowfocus --sync $XW
 printf 'Send "{F13}"\n' > /tmp/opencode/f13only.ahk
 python3 -m ahk_bridge.cli run /tmp/opencode/f13only.ahk --backend uinput
-grep -a "keysym" /tmp/opencode/xev-kde2.log   # want keycode 191 / keysym 0xffca (F13)
+grep -a "keysym" /tmp/opencode/xev-kde2.log   # want keycode 191 press+release (keysym XF86Tools on this keymap, see above)
 ```
-Last attempt showed focus drift (a Wine "FitGirl" window stole focus mid-run)
-and possibly literal `{F13}` text instead of the key — unverified, do NOT
-claim it works until the log shows 0xffca.
 
 ## 6. Suggested next tasks (in order)
 
-1. Redo §5.1. If `{F13}` types literally, the bug is in `_send_text` brace
-   handling (runtime.py ~line 500-570), not the parser (parser emits
-   `Send("{F13}")` correctly).
-2. Remaining `}` (5) / `{` (5) / `else` (≤2) stragglers: locate per-file
-   (census groups by file), fix only if a systematic cause appears; do NOT
-   chase singletons.
-3. `NumPut(`/multi-line `DllCall(`: check whether they are balanced-complete
-   first lines (then: join-or-log decision).
+1. ~~Redo §5.1~~ DONE 2026-10-16 (§5.1 proven, `_SPECIAL_KEYS` F13–F24 fix
+   + regression test, 69 green, committed+pushed).
+2. ~~Remaining `}` (5) / `{` (5) / `else` (≤2) stragglers~~ DECIDED
+   2026-10-16: NO systematic cause — function-level census traces them to
+   MsgBox TEXT-block prose (`nm_AFBDiceEnableHelpButton` help text),
+   test-data strings containing code (`nm_createWalk` `"test"` block),
+   a leading-comma Gdip def-header (`Gdip_ImageSearch`), and auto-section
+   cascade from the same text-block class. Common else-shapes
+   (bare-else-next-line, tab-indented `} else {`, else-try-multiline)
+   were probe-parsed and all succeed in isolation. Per the rule, no fix;
+   chasing them further means dissecting a 23k-line file for ~10
+   unexecutable-by-design nodes.
+3. ~~`NumPut(`/multi-line `DllCall(`~~ DECIDED 2026-10-16: LOG, no fix.
+   First lines are NOT balanced-complete: `NumPut(` stands bare (opener
+   only, args quote-led on following lines — the joiner only glues
+   leading `,`/`.`/`&&`/`||` unconditionally) and the Gdip `DllCall(`
+   spans leading-comma lines with trailing `;` comments where the join
+   stalls mid-call (reproduced live). Even a perfect join yields
+   `FuncCall→stub` (memory/GDI+ has no backend, §4.3): 417→~411 raws,
+   zero execution value, real joiner-surgery risk to the 98.1%.
 4. Commit + push (remote is `origin`, user already approved pushing).
 5. Then the honest roadmap: GUI + Gdip image-search are the two load-bearing
    gaps for actually RUNNING Natro (see §4 + §7).

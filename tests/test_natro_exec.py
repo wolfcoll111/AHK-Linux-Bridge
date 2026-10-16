@@ -182,3 +182,14 @@ def test_try_else_on_throw():
                    '    x := -1\n} else {\n    x := 2\n}\n')
     rt.run_auto()
     assert rt.vars["x"] == -1
+
+
+def test_send_f13_taps_key_not_literal():
+    # Live-proof regression: {F13} must tap F13, not type "{F13}" text.
+    # xev showed braceleft/F/1/3/braceright before the fix (F13 missing
+    # from _SPECIAL_KEYS); uinput already maps f1..f24.
+    _, rt, sim = run('Send "{F13}"\n')
+    rt.run_auto()
+    keys = [e[1] for e in sim.log if e[0] == "key"]
+    assert keys == ["F13"]
+    assert types(sim) == []
