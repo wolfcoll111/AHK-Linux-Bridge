@@ -379,6 +379,50 @@ def test_runtime_image_search_writes_byref_and_disposes(monkeypatch):
     assert vision._table_size() == baseline
 
 
+def test_runtime_native_imagesearch_finds_and_sets_byref(monkeypatch, tmp_path):
+    needle = _pattern(9, 7, seed=51)
+    canvas = _paste(Image.new("RGB", (100, 80), (1, 2, 3)), needle, 31, 22)
+    path = tmp_path / "needle.png"
+    needle.save(path)
+    text = (
+        f'found := ImageSearch(&fx, &fy, 0, 0, 99, 79, "{path}")\n'
+        'MsgBox {found}:{fx},{fy}\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert rt.vars["found"] == 1
+    assert (rt.vars["fx"], rt.vars["fy"]) == (31, 22)
+
+
+def test_runtime_native_imagesearch_honours_variation_prefix(monkeypatch, tmp_path):
+    needle = _pattern(10, 8, seed=53)
+    shifted = Image.eval(needle, lambda v: min(255, v + 12))
+    canvas = _paste(Image.new("RGB", (100, 80), (1, 2, 3)), shifted, 44, 33)
+    path = tmp_path / "needle.png"
+    needle.save(path)
+    text = (
+        f'found := ImageSearch(&fx, &fy, 0, 0, 99, 79, "*12 {path}")\n'
+        'MsgBox {found}:{fx},{fy}\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert (rt.vars["found"], rt.vars["fx"], rt.vars["fy"]) == (1, 44, 33)
+
+
+def test_runtime_native_imagesearch_missing_file_returns_two(tmp_path):
+    from ahk_bridge.parser import parse_script
+    from ahk_bridge.runtime import Runtime
+    from ahk_bridge.backends.dry_backend import DryBackend
+
+    missing = tmp_path / "not-there.png"
+    script = parse_script(
+        f'found := ImageSearch(&fx, &fy, 0, 0, 99, 79, "{missing}")\n'
+        'MsgBox {found}:{fx},{fy}\n')
+    rt = Runtime(script, DryBackend())
+    rt.run_auto()
+    assert rt.vars["found"] == 2
+    assert (rt.vars["fx"], rt.vars["fy"]) == (0, 0)
+    assert any("returns 2" in line for line in rt.logs)
+
+
 def test_runtime_omitted_args_keep_positional_meaning(monkeypatch):
     # Variation is argument 7.  If empty slots were dropped, 12 would land on
     # OuterX1 and this shaded needle would not match (variation would be 0).

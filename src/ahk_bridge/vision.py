@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import os
 import threading
 
 from PIL import Image
@@ -97,6 +98,29 @@ def create_bitmap(width, height) -> int:
     if w <= 0 or h <= 0:
         raise ValueError("bitmap dimensions must be positive")
     return _register(Image.new("RGBA", (w, h), (0, 0, 0, 0)))
+
+
+def from_file(path) -> int:
+    """Load an image file into a bitmap handle (native ImageSearch helper).
+
+    Uses a Windows-style case-insensitive fallback so a corpus copied from
+    Windows still finds ``nm_image_assets\\Died.png`` for ``died.png``.
+    """
+    name = str(path)
+    if not name:
+        raise ValueError("empty image path")
+    if not os.path.exists(name):
+        # Local import keeps vision usable without the include machinery.
+        from .includes import _ci_resolve
+        hit = _ci_resolve(os.path.abspath(name))
+        if hit:
+            name = hit
+    try:
+        image = Image.open(name)
+        image.load()
+    except Exception as exc:
+        raise ValueError(f"cannot load image {path!r}: {exc}") from exc
+    return _register(image)
 
 
 def _parse_region(region):

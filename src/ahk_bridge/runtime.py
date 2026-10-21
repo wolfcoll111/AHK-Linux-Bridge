@@ -563,6 +563,8 @@ class Runtime:
         if low == "sleep" and c.args:
             self.sim.sleep_ms(self._resolve_sleep(c.args[0]))
             return ""
+        if low == "imagesearch":
+            return self._image_search(c.args)
         if low in ("send", "sendinput", "sendevent", "sendplay", "sendtext") and c.args:
             self._send_eval(str(c.args[0]))
             return ""
@@ -573,6 +575,141 @@ class Runtime:
             self._win_activate(str(c.args[0]))
             return ""
         return self._pure_builtin(low, c.args)
+
+    def _image_search(self, args: list):
+        """Native AHK ``ImageSearch`` on top of the vision layer.
+
+        v1/v2 syntax accepted: ``ImageSearch(&X, &Y, X1, Y1, X2, Y2,
+        ImageFile)`` with ``*n`` variation, ``*TransN`` and ``*IconN``
+        prefixes in ImageFile.  Coordinates are screen coordinates and the
+        search rectangle is inclusive, as documented by AHK.
+        """
+        import os as _os
+        from . import vision
+
+        def raw(i):
+            return args[i].strip() if i < len(args) else ""
+
+        def value(i, default=None):
+            text = raw(i)
+            if text == "":
+                return default
+            return self._eval_expr(text)
+
+        def byref(i):
+            text = raw(i)
+            if text.startswith("&"):
+                target = text[1:].strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", target):
+                    return target
+            return None
+
+        tx, ty = byref(0), byref(1)
+        # AHK resets output coordinates to 0 when the image is not found.
+        if tx:
+            self.vars[tx] = 0
+        if ty:
+            self.vars[ty] = 0
+
+        file_arg = raw(6)
+        if not file_arg:
+            self.logs.append("ImageSearch: missing ImageFile (returns 0)")
+            return 0
+        spec = str(self._eval_expr(file_arg)).strip()
+        variation, trans, tokens = 0, None, []
+        for token in spec.split():
+            if not token.startswith("*"):
+                tokens.append(token)
+                continue
+            m = re.fullmatch(r"\*(\d+)", token)
+            if m:
+                variation = int(m.group(1))
+                continue
+            m = re.fullmatch(r"(?i)\*trans(?:=)?(.+)", token)
+            if m:
+                color = m.group(1).strip().lower()
+                trans = {"black": 0x000000, "white": 0xFFFFFF,
+                         "silver": 0xC0C0C0, "gray": 0x808080,
+                         "red": 0xFF0000, "green": 0x00FF00,
+                         "blue": 0x0000FF}.get(color)
+                if trans is None:
+                    try:
+                        trans = int(color, 0)
+                    except ValueError:
+                        trans = None
+                continue
+            # *IconN selects an icon resource on Windows; the image file is
+            # a normal PNG here, so the option is harmless.
+            if re.fullmatch(r"(?i)\*icon\d+", token):
+                continue
+            self.logs.append(f"ImageSearch: ignoring option {token!r}")
+        path = " ".join(tokens).strip().strip('"')
+        if not path:
+            self.logs.append("ImageSearch: no image file after options (returns 0)")
+            return 0
+        path = path.replace("\\", _os.sep)
+        base = str(self.vars.get("A_WorkingDir") or _os.getcwd())
+        if not _os.path.isabs(path):
+            path = _os.path.join(base, path)
+        path = _os.path.expanduser(path)
+
+        try:
+            x1 = int(value(2, 0) or 0)
+            y1 = int(value(3, 0) or 0)
+            x2 = value(4, None)
+            y2 = value(5, None)
+            x2 = int(x2) if x2 not in (None, "") else 0
+            y2 = int(y2) if y2 not in (None, "") else 0
+        except (TypeError, ValueError):
+            self.logs.append("ImageSearch: non-numeric coordinates (returns 0)")
+            return 0
+        screen_w = int(self.vars.get("A_ScreenWidth") or 1920)
+        screen_h = int(self.vars.get("A_ScreenHeight") or 1080)
+        if x2 <= 0:
+            x2 = screen_w - 1
+        if y2 <= 0:
+            y2 = screen_h - 1
+        if x2 < x1 or y2 < y1:
+            self.logs.append("ImageSearch: empty search rectangle (returns 0)")
+            return 0
+
+        try:
+            needle = vision.from_file(path)
+        except ValueError as exc:
+            key = f"imagesearch:{path}"
+            if key not in self._stub_warned:
+                self._stub_warned.add(key)
+                self.logs.append(f"ImageSearch: {exc} (returns 2)")
+            return 2
+
+        hay = 0
+        try:
+            hay = vision.from_screen(
+                f"{x1}|{y1}|{x2 - x1 + 1}|{y2 - y1 + 1}")
+            count, text = vision.image_search(
+                hay, needle, variation=variation, trans=trans)
+        except Exception as exc:  # noqa: BLE001 - script must not crash
+            self.logs.append(f"ImageSearch failed: {exc} (returns 0)")
+            return 0
+        finally:
+            vision.dispose(hay)
+            vision.dispose(needle)
+
+        tx, ty = byref(0), byref(1)
+        found = count > 0 and text != ""
+        coords = (0, 0)
+        if found:
+            first = text.split("\n", 1)[0]
+            try:
+                cx, cy = first.split(",", 1)
+                coords = (x1 + int(cx), y1 + int(cy))
+            except ValueError:
+                found = False
+        if tx:
+            self.vars[tx] = coords[0]
+        if ty:
+            self.vars[ty] = coords[1]
+        return 1 if found else 0
 
     def _gdip_builtin(self, name: str, args: list):
         """Execute the Gdip_* surface Natro's eyes actually use.
