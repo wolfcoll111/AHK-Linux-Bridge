@@ -23,11 +23,22 @@ This document is both the handoff and the paste-prompt (§8). Read
 
 ## 1. Verified baseline (measured 2026-10-21)
 
-- `python3 -m pytest -q` → **128 passed** (84 v0.3 + 44 vision).
-- Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
-  `__raw__` = 1.71%**. The 380 raws are help-text prose, Gdip machine-code
-  blobs, memory/DllCall stubs, and 2–3 join fragments. **Do not chase
-  them** unless a census shows one on a load-bearing path.
+- `python3 -m pytest -q` → **155 passed** (v0.4's 128 + include,
+  parser, census and regression tests).
+- Natro corpus: **150 files, 0 crashes, 593 functions, 22,125 nodes, 422
+  `__raw__` = 1.91%**. This is the post-dangling-else-fix recount; the old
+  handoff numbers (524 / 22,176 / 380) were measured before the parser
+  correction and are superseded. The raw nodes remain help-text prose,
+  Gdip machine-code blobs, memory/DllCall stubs, and join fragments. **Do
+  not chase them** unless a census shows one on a load-bearing path.
+- Stub census baseline (`docs/CENSUS-v0.5.md`, generated 2026-10-21):
+  **150/150 scripts executed**, 0 timeouts, 1 worker-budget stop
+  (`StatMonitor.ahk`, partial inventory), **10 unknown load-bearing
+  hits**: `IniRead`, `DateDiff`, `OnExit`, no-arg `OSError`, `SplitPath`,
+  `String`, `Number`, `ImageSearch`, and the parser misread of
+  `Sleep(...)` as a legacy command. Known language gaps (assign targets,
+  `for-in`, parser function-body leakage) are reported separately and are
+  the next work queue.
 - `python3 -m ahk_bridge.cli check` → `detected_backend: uinput`,
   `/dev/uinput` writable, `session_type: wayland`.
 - Live capture: `pixels.screenshot_rgb((0,0,32,32))` returns `(32, 32)`,
@@ -380,8 +391,8 @@ This is the part that turns the engine into an app:
   every remaining stub is in the documented display-only/external class.
 - Full test suite green; new tests cover each group and fail without the
   fix.
-- Corpus still 524 funcs / 22,176 nodes / 380 raw / 0 crashes (per-file
-  recount; the expanded main script is counted separately).
+- Corpus still has 0 crashes; the post-fix baseline is 593 funcs / 22,125
+  nodes / 422 raw (see §1; the expanded main script is counted separately).
 - Commit + push; update this doc's baseline and census numbers.
 
 ### v0.6 — GUI compatibility layer
