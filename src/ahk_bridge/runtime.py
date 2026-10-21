@@ -102,6 +102,63 @@ class Runtime:
         self.jitter = jitter  # 0.0..1.0 fraction of Sleep randomization
         self._rng = random.Random(seed)
         self._stub_warned: set = set()  # builtin stubs logged once each
+        self._exit_callbacks: list[tuple] = []
+        self._exit_done = False
+
+    # -- exit callbacks --
+    @staticmethod
+    def _callback_spec(raw: str):
+        """Parse a callback argument into ("func", name) or ("expr", body)."""
+        text = str(raw).strip()
+        m = re.match(r'^(\([^)]*\)|[A-Za-z_]\w*)\s*=>\s*(.+)$', text, re.DOTALL)
+        if m:
+            params = m.group(1).strip()
+            if params.startswith("("):
+                params = params[1:-1]
+            names = [p.strip().lstrip("&").split(":=")[0].strip()
+                     for p in params.split(",") if p.strip()]
+            names = [n for n in names if n and n != "*"]
+            return ("expr", m.group(2).strip(), names)
+        if re.fullmatch(r'[A-Za-z_]\w*', text):
+            return ("func", text, [])
+        return None
+
+    def _run_exit_callbacks(self, reason: str = "Exit", code=0) -> bool:
+        """Run OnExit callbacks; return True if one prevented the exit."""
+        if self._exit_done:
+            return False
+        prevented = False
+        for spec in list(self._exit_callbacks):
+            try:
+                if spec[0] == "func":
+                    result = self._call_value(P.FuncCall(spec[1], [
+                        f'"{reason}"', str(code)]))
+                else:
+                    kind, body, names = spec
+                    saved = {n: self.vars.get(n) for n in names}
+                    for index, name in enumerate(names):
+                        self.vars[name] = reason if index == 0 else code
+                    try:
+                        result = self._eval_expr(body)
+                    finally:
+                        for name in names:
+                            if saved[name] is None:
+                                self.vars.pop(name, None)
+                            else:
+                                self.vars[name] = saved[name]
+                try:
+                    if str(result).strip() not in ("", "0"):
+                        prevented = True
+                        break
+                except Exception:
+                    pass
+            except Exception as exc:  # noqa: BLE001 - cleanup must not crash
+                self.logs.append(f"OnExit callback failed: {exc}")
+        if prevented:
+            self.logs.append("OnExit callback returned non-zero; exit prevented")
+        else:
+            self._exit_done = True
+        return prevented
 
     # -- abort --
     def abort(self):
@@ -117,7 +174,12 @@ class Runtime:
 
     # -- entry points --
     def run_auto(self):
-        self._exec_block(self.script.auto_section)
+        try:
+            self._exec_block(self.script.auto_section)
+        except Aborted:
+            raise
+        else:
+            self._run_exit_callbacks("Exit", 0)
 
     def fire_hotkey(self, key: str):
         for hk in self.script.hotkeys:
@@ -324,6 +386,8 @@ class Runtime:
             raise RuntimeError(str(self._eval_expr(st.value)) if st.value else "throw")
         elif isinstance(st, P.ExitApp):
             self.logs.append(f"ExitApp({st.code}) - clean end of script")
+            if self._run_exit_callbacks("Exit", st.code):
+                return
             raise Aborted("ExitApp")
         elif isinstance(st, P.LegacyCmd):
             self._legacy(st)
@@ -388,6 +452,25 @@ class Runtime:
         low = c.name.lower()
         if low.startswith("gdip_"):
             return self._gdip_builtin(c.name, c.args)
+        if low == "onexit":
+            spec = self._callback_spec(c.args[0]) if c.args else None
+            addremove = 1
+            if len(c.args) > 1:
+                try:
+                    addremove = int(self._eval_expr(c.args[1]))
+                except (TypeError, ValueError):
+                    addremove = 1
+            if spec is None:
+                self.logs.append("OnExit: unsupported callback expression (logged)")
+                return 0
+            if addremove == 0:
+                self._exit_callbacks = [s for s in self._exit_callbacks if s != spec]
+            elif addremove == -1:
+                self._exit_callbacks.insert(0, spec)
+            else:
+                self._exit_callbacks.append(spec)
+            self.logs.append(f"OnExit registered {spec[1]!r} (AddRemove={addremove})")
+            return 1
         if low == "sleep" and c.args:
             self.sim.sleep_ms(self._resolve_sleep(c.args[0]))
             return ""

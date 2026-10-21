@@ -105,6 +105,43 @@ def test_keywait_timeout_sleeps():
     assert ("sleep", 1000) in [(e[0], e[1]) for e in sim.log]
 
 
+def test_onexit_named_callback_fires_once_on_exitapp():
+    text = (
+        "OnExit(Cleanup)\n"
+        "Cleanup(reason, code) {\n"
+        '    Send "{reason}:{code}"\n'
+        "}\n"
+        "ExitApp 7\n"
+    )
+    sc, rt, sim = run(text)
+    with pytest.raises(R.Aborted):
+        rt.run_auto()
+    assert types(sim) == ["Exit:7"]
+    with pytest.raises(R.Aborted):
+        rt.run_auto()
+    assert types(sim) == ["Exit:7"]
+
+
+def test_onexit_inline_arrow_and_order():
+    text = (
+        'OnExit((*) => Send("first"))\n'
+        'OnExit((*) => Send("second"), -1)\n'
+        "ExitApp\n"
+    )
+    sc, rt, sim = run(text)
+    with pytest.raises(R.Aborted):
+        rt.run_auto()
+    assert types(sim) == ["second", "first"]
+
+
+def test_onexit_runs_on_normal_script_end():
+    sc, rt, sim = run('OnExit((*) => Send("done"))\n')
+    rt.run_auto()
+    assert types(sim) == ["done"]
+    rt.run_auto()  # exit already handled; must not fire twice
+    assert types(sim) == ["done"]
+
+
 def test_splitpath_call_and_command_byref_outputs():
     text = (
         'SplitPath("/home/user/My File.txt", &name, &dir, &ext, &noext, &drive)\n'
