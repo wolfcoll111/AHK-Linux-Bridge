@@ -53,7 +53,10 @@ see §5 perf numbers).
   (`windowX "|" windowY ...`) and arithmetic with calls (`Round`, `Max`,
   `Floor`, user functions), `Screen:=`/`Raster:=` named arguments, and
   screen-clamped regions (negative/overflow shrink the crop; a fully
-  off-screen region is a 1x1 black frame, never an exception).
+  off-screen region is a 1x1 black frame, never an exception).  All 127
+  real `Gdip_BitmapFromScreen` call-site argument expressions evaluate to
+  region-shaped values (129 textual occurrences include the library
+  definition and one commented contract line).
   Computed-region live proof: `Screen:=x "|" y "|" w "|" h` through the
   real runtime returned count 1, list `100,100` (global 400,300); log
   `/tmp/opencode/vision-live-proof-phase3.log`.
