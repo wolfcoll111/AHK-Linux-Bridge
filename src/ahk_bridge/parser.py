@@ -530,6 +530,52 @@ def _scan_chain(rest: str):
     return names, k
 
 
+def _split_statements(s: str) -> list:
+    """Split top-level commas that separate *statements*.
+
+    Unlike :func:`_split_seq` (function arguments), braces are containers
+    here: `x := {a: 1, b: 2}` must stay one assignment.  Legacy comma
+    commands (`Menu, Tray, Add`) are filtered by the caller, which only
+    accepts parts that look executable.
+    """
+    parts, depth, q, cur = [], 0, None, ""
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "`" and k + 1 < len(s):
+            cur += s[k:k + 2]
+            k += 2
+            continue
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+        elif ch in ('"', "'"):
+            q = ch
+            cur += ch
+        elif ch in "([{":
+            depth += 1
+            cur += ch
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            cur += ch
+        elif ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        k += 1
+    parts.append(cur)
+    return parts
+
+
+def _looks_like_statement(part: str) -> bool:
+    """Reject legacy comma-command operands (`Menu, Tray, Add`)."""
+    p = part.strip()
+    return bool(re.search(
+        r':=|\+=|-=|\*=|/=|\.=|&=|\|=|\+\+|--|\(', p))
+
+
 def _split_seq(s: str) -> list:
     """Split top-level comma-separated statements (AHK `a(), b()`)."""
     parts, depth, q, cur = [], 0, None, ""
@@ -863,6 +909,21 @@ def parse_statement(line: str):
         if _inner is not None and not (
                 isinstance(_inner, FuncCall) and _inner.name == "__raw__"):
             return _inner
+    # Comma-separated statements: `settings := Map(), settings.CaseSense := 0`
+    # (Natro's map init pattern).  Keep object literals/args intact via
+    # bracket-aware splitting, and leave legacy comma commands alone.
+    _stmt_parts = _split_statements(s)
+    if len(_stmt_parts) > 1 and all(
+            p.strip() and _looks_like_statement(p) for p in _stmt_parts):
+        _items = []
+        for _part in _stmt_parts:
+            _sub = parse_statement(_part.strip())
+            if _sub is None:
+                _items = []
+                break
+            _items.append(_sub)
+        if len(_items) == len(_stmt_parts):
+            return Seq(_items)
     m = re.match(r'^\s*([A-Za-z_]\w*)\s*:=\s*(.+)$', s)
     if m:
         # Keep RAW expression for runtime eval (arithmetic, Random(), etc.).

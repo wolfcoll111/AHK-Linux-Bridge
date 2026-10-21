@@ -47,6 +47,29 @@ def test_abort_stops_loop():
         pass
 
 
+def test_comma_separated_statements_keep_map_targets_alive():
+    # Natro initializes maps with `settings := Map(), settings.CaseSense := 0`.
+    # Parsing that as one assignment made `settings` a string, so every
+    # later `settings[...] := ...` failed with "cannot store into str".
+    text = (
+        "settings := Map(), settings.CaseSense := 0\n"
+        'settings["x"] := 1\n'
+        "bitmaps := Map(), bitmaps.CaseSense := 0\n"
+        'bitmaps["day"] := Map("ant", 2)\n'
+    )
+    sc, rt, sim = run(text)
+    assert type(sc.auto_section[0]).__name__ == "Seq"
+    rt.run_auto()
+    assert rt.vars["settings"]["x"] == 1
+    assert rt.vars["bitmaps"]["day"]["ant"] == 2
+
+
+def test_object_literal_commas_are_not_statement_separators():
+    sc, rt, sim = run('x := {a: 1, b: 2}\n')
+    assert type(sc.auto_section[0]).__name__ == "Assign"
+    assert sc.auto_section[0].value == "{a: 1, b: 2}"
+
+
 def test_braceless_if_does_not_steal_enclosing_else():
     # Regression: `if atHive()` on its own line followed by `} else {`
     # used to attach the outer else to the braceless if and swallow the
