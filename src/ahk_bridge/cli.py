@@ -5,13 +5,17 @@ import json
 import sys
 import time
 from .parser import parse_script
+from .includes import load_script
 from .runtime import Runtime
 from .input_abstract import InputSimulator
 
 
 def cmd_run(args) -> int:
-    text = open(args.script).read()
-    script = parse_script(text)
+    if args.no_includes:
+        script = parse_script(open(args.script, encoding="utf-8-sig").read())
+        expanded = None
+    else:
+        script, expanded = load_script(args.script)
     if args.list_hotkeys:
         for hk in script.hotkeys:
             print(f"{hk.key}: {len(hk.body)} statements")
@@ -246,6 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run an .ahk script (auto-section or one hotkey)")
     r.add_argument("script")
     r.add_argument("--backend", choices=["x11", "uinput", "dry"], default=None)
+    r.add_argument("--no-includes", action="store_true",
+                   help="parse the file without expanding #Include directives")
     r.add_argument("--hotkey", default=None, help="fire single hotkey instead of auto-section")
     r.add_argument("--repeat", type=int, default=1, help="repeat whole run N times (AFK loops)")
     r.add_argument("--delay-ms", type=int, default=0, help="sleep between --repeat runs")
