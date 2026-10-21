@@ -883,7 +883,11 @@ def parse_statement(line: str):
         return IncDec(m.group(2), 1 if m.group(1) == "++" else -1)
     m = LEGACY_CMD_RE.match(s)
     if m and not re.match(r'^\s*:?=', m.group(2)):
-        return LegacyCmd(m.group(1), m.group(2).strip())
+        # AHK v2 call syntax wins over the legacy command: `Sleep(100)` must
+        # reach the runtime's sleep builtin, not become a no-op LegacyCmd.
+        if not (m.group(1).lower() == "sleep"
+                and m.group(2).lstrip().startswith("(")):
+            return LegacyCmd(m.group(1), m.group(2).strip())
     # short-circuit statement forms: A && B / A || B, incl. N-ary chains
     # (`IsSet(x) && ok && cleanup()` runs cleanup only if all hold).
     # Skipped when the head is an assignment: `x := a && b` assigns the

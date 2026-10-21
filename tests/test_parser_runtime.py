@@ -47,6 +47,18 @@ def test_abort_stops_loop():
         pass
 
 
+def test_sleep_call_syntax_is_not_a_legacy_noop():
+    # `Sleep(100)` is a function call in AHK v2.  The legacy-command regex
+    # used to eat the parenthesized argument and the runtime logged a no-op,
+    # so path scripts never actually paused.
+    sc, rt, sim = run('Sleep(150), x := 1\n')
+    assert type(sc.auto_section[0]).__name__ == "Seq"
+    assert type(sc.auto_section[0].items[0]).__name__ == "FuncCall"
+    rt.run_auto()
+    assert ("sleep", 150) in sim.log
+    assert rt.vars["x"] == 1
+
+
 def test_comma_separated_statements_keep_map_targets_alive():
     # Natro initializes maps with `settings := Map(), settings.CaseSense := 0`.
     # Parsing that as one assignment made `settings` a string, so every
