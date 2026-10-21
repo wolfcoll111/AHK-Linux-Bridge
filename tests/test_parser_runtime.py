@@ -1,4 +1,4 @@
-from ahk_bridge.parser import parse_script
+from ahk_bridge.parser import parse_logical_lines, parse_script
 from ahk_bridge import runtime as R
 from ahk_bridge.backends.dry_backend import DryBackend
 
@@ -45,6 +45,46 @@ def test_abort_stops_loop():
         assert False, "should abort"
     except R.Aborted:
         pass
+
+
+def test_block_arrow_function_does_not_leak_enclosing_body():
+    # HashFile defines HCRYPTPROV() => { ... } inside HashFile.  The arrow
+    # body's closing brace used to close HashFile itself, spilling the rest
+    # of the function into the auto-execute section.
+    text = (
+        "Foo() {\n"
+        "  x := 1\n"
+        "  Bar() => {\n"
+        "    ptr: 0,\n"
+        '    __delete: this => MsgBox("x")\n'
+        "  }\n"
+        "  y := 2\n"
+        "  if y\n"
+        "    z := 3\n"
+        "}\n"
+        "After() {\n"
+        "  return 1\n"
+        "}\n"
+    )
+    sc = parse_script(text)
+    assert sc.auto_section == []
+    assert "After" in sc.functions
+    assert [type(n).__name__ for n in sc.functions["Foo"].body] == [
+        "Assign", "FuncDef", "Assign", "If"]
+    assert sc.functions["Foo"].body[1].name == "Bar"
+
+
+def test_block_arrow_function_is_hoisted_for_includes():
+    sc = parse_logical_lines([
+        "Foo() {",
+        "  Bar() => {",
+        "    return 7",
+        "  }",
+        "}",
+        "x := Bar()",
+    ])
+    assert "Bar" in sc.functions
+    assert sc.functions["Bar"].body[0].value == "7"
 
 
 def test_sleep_call_syntax_is_not_a_legacy_noop():

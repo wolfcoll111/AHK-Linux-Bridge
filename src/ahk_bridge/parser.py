@@ -1167,6 +1167,31 @@ def _parse_case_statement(lines: list[str], i: int):
                 clean.append(p.split()[0])
         body, i, _ = _parse_block(lines, i + 1)
         return FuncDef(mf.group(1), clean, body), i
+    # Named arrow function with a block body: `Name(args) => { ... }`.
+    # Without this, the arrow body's `}` closed the *enclosing* function and
+    # the rest of that function leaked into the auto-execute section (seen in
+    # Natro's HashFile and Gdip_ImageSearch).
+    _mc_arrow = _match_call(code)
+    if _mc_arrow is not None and _mc_arrow[2].startswith("=>"):
+        _aname, _aargs, _arest = _mc_arrow
+        if _aname.lower() not in _KEYWORDS:
+            _arrow_rest = _arest[2:].strip()
+            _body_at = None
+            if _arrow_rest.startswith("{"):
+                _body_at = i + 1
+            elif not _arrow_rest:
+                _j = _skip_blank(lines, i + 1)
+                if _j < len(lines) and lines[_j].strip() == "{":
+                    _body_at = _j + 1
+            if _body_at is not None:
+                _params = []
+                for _a in _parse_args(_aargs):
+                    _seg = str(_a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
+                    _seg = _seg.rstrip("?*").strip()
+                    if _seg.split():
+                        _params.append(_seg.split()[0])
+                _body, _ni, _ = _parse_block(lines, _body_at)
+                return FuncDef(_aname, _params, _body), _ni
     mc = CLASS_RE.match(code)
     if mc:
         body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
