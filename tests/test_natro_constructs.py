@@ -102,6 +102,34 @@ def test_keywait_timeout_sleeps():
     assert ("sleep", 1000) in [(e[0], e[1]) for e in sim.log]
 
 
+def test_iniread_builtin_matches_ahk_semantics(tmp_path):
+    ini = tmp_path / "nm_config.ini"
+    ini.write_text(
+        "\ufeff[Settings]\n"
+        "GuiTheme = Dark\n"
+        "Percent = 100% done\n"
+        "[Planters]\n"
+        "TimerX=12\n",
+        encoding="utf-8",
+    )
+    path = str(ini).replace("\\", "/")
+    missing = str(tmp_path / "absent.ini").replace("\\", "/")
+    text = (
+        f'a := IniRead("{path}", "settings", "guitheme", "fallback")\n'
+        f'b := IniRead("{path}", "Settings", "missing", 42)\n'
+        f'c := IniRead("{missing}", "Settings", "GuiTheme", "dflt")\n'
+        f'd := IniRead("{path}", "Settings", "Percent")\n'
+        f'e := IniRead("{path}", "Planters", "TimerX")\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert rt.vars["a"] == "Dark"
+    assert rt.vars["b"] == 42
+    assert rt.vars["c"] == "dflt"
+    assert rt.vars["d"] == "100% done"
+    assert rt.vars["e"] == "12"
+
+
 def test_ini_write_read_roundtrip(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     sc, rt, sim = run('IniWrite "hello", "t.ini", "S", "K"\nv := ""\nIniRead v, "t.ini", "S", "K"\nSend v\n')

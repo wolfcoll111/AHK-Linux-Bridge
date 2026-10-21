@@ -588,6 +588,10 @@ class Runtime:
                 return str(ev(args[0]))
             if low == "buffer":
                 return ""
+            if low == "iniread" and len(args) >= 3:
+                default = ev(args[3]) if len(args) > 3 else ""
+                return self._read_ini_value(str(ev(args[0])), str(ev(args[1])),
+                                            str(ev(args[2])), default)
             if low in ("fileexist", "winexist", "wingetcount", "processexist"):
                 return ""
             if low in ("isinteger", "isnumber") and args:
@@ -1344,11 +1348,13 @@ class Runtime:
         fname = str(self._eval_expr(st.filename))
         section = str(self._eval_expr(st.section))
         key = str(self._eval_expr(st.key))
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(interpolation=None, strict=False,
+                                        allow_no_value=True)
         cfg.optionxform = str  # keep key case
         try:
             if os.path.exists(fname):
-                cfg.read(fname, encoding="utf-8")
+                with open(fname, encoding="utf-8-sig") as fh:
+                    cfg.read_file(fh)
             if st.op == "write":
                 if not cfg.has_section(section):
                     cfg.add_section(section)
@@ -1357,16 +1363,42 @@ class Runtime:
                     cfg.write(f)
                 self.logs.append(f"IniWrite [{section}] {key} -> {fname}")
             else:
-                try:
-                    v = cfg.get(section, key)
-                except (configparser.NoSectionError, configparser.NoOptionError):
-                    v = ""
+                v = self._read_ini_value(fname, section, key, "")
                 target = str(st.value)
                 if re.match(r"^[A-Za-z_]\w*$", target):
                     self.vars[target] = v
                 self.logs.append(f"IniRead [{section}] {key} -> {v!r}")
         except OSError as e:
             self.logs.append(f"IniOp error: {e}")
+
+    @staticmethod
+    def _read_ini_value(fname: str, section: str, key: str, default=""):
+        """AHK IniRead semantics: missing file/section/key -> default.
+
+        Windows profile APIs are case-insensitive for section and key names,
+        trim surrounding whitespace, and do not interpolate `%`.  ConfigParser
+        is configured to match; a BOM is accepted.
+        """
+        import configparser
+        import os
+        try:
+            if not os.path.exists(fname):
+                return default
+            cfg = configparser.ConfigParser(interpolation=None, strict=False,
+                                            allow_no_value=True)
+            cfg.optionxform = str
+            with open(fname, encoding="utf-8-sig") as fh:
+                cfg.read_file(fh)
+            sec = next((s for s in cfg.sections()
+                        if s.lower() == section.lower()), None)
+            if sec is None:
+                return default
+            for name, value in cfg.items(sec, raw=True):
+                if name.lower() == key.lower():
+                    return "" if value is None else value.strip()
+        except (OSError, configparser.Error, UnicodeDecodeError):
+            return default
+        return default
 
     # -- expression layer --
     def _eval_expr(self, raw):
