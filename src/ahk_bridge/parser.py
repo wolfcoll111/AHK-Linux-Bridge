@@ -981,25 +981,32 @@ def _skip_blank(lines: list[str], i: int) -> int:
     return i
 
 
-def _parse_else_tail(lines: list[str], i: int, then_closed: bool = False):
+def _parse_else_tail(lines: list[str], i: int, then_closed: bool = False,
+                     braceless: bool = False):
     """Consume `} Else If .. {`, `} Else {`, or bare `Else` (+ single stmt).
     Returns (else_body, next_i). ElseIf chains recurse into If nodes.
 
     then_closed: the then-body already consumed its own lone-`}` closer. A
     `}`-led else line then closes the ENCLOSING block instead — it is not
-    ours (dangling-else). Bare `else` (no leading brace) still attaches."""
+    ours (dangling-else). Bare `else` (no leading brace) still attaches.
+    braceless: the then-body was a single statement (`if x` newline `y`). A
+    following `} else {` belongs to the enclosing block, never to this
+    braceless if (otherwise the outer else is stolen and the enclosing
+    block's closing brace is consumed — this swallowed Natro's nm_Reset
+    following functions)."""
     n = len(lines)
     i = _skip_blank(lines, i)
     if i >= n:
         return [], i
     code = _strip_comment(lines[i]).strip()
-    if then_closed and code.startswith("}"):
+    if code.startswith("}") and (then_closed or braceless):
         return [], i
     m = ELSEIF_RE.match(code)
     if m:
         cond = m.group(1).strip()
         then_body, i, closed = _body_after_opener(lines, i + 1, _has_brace(code))
-        tail, i = _parse_else_tail(lines, i, closed)
+        tail, i = _parse_else_tail(lines, i, closed,
+                                    braceless=not _has_brace(code))
         return [If(cond, then_body, tail)], i
     if ELSE_RE.match(code):
         return _parse_block(lines, i + 1)[:2]
@@ -1201,7 +1208,7 @@ def _parse_case_statement(lines: list[str], i: int):
     m = IF_SINGLE_RE.match(code)
     if m and not _has_brace(code):
         body, i, closed = _parse_single_or_block(lines, i + 1)
-        tail, i = _parse_else_tail(lines, i, closed)
+        tail, i = _parse_else_tail(lines, i, closed, braceless=True)
         return If(m.group(1).strip(), body, tail), i
     m = SWITCH_RE.match(code)
     if m:
@@ -1423,9 +1430,64 @@ def _parse_block(lines: list[str], i: int, top: bool = False):
     return stmts, i, False
 
 
-def parse_script(text: str) -> Script:
-    sc = Script()
+def parse_script(text: str, *, source_map: list | None = None) -> Script:
+    """Parse source text. ``source_map`` (optional) has one
+    ``(file, line)`` entry per *logical* line and is used to tag top-level
+    nodes with ``_source`` metadata."""
     lines = _join_continuations(text)
+    if source_map is not None and len(source_map) != len(lines):
+        # Callers normally pass a map produced by the same join algorithm;
+        # a mismatch must never mislabel statements.
+        source_map = None
+    return _parse_lines(lines, source_map)
+
+
+def parse_logical_lines(lines: list[str], *, source_map: list | None = None,
+                        hoist_functions: bool = True) -> Script:
+    """Parse already-joined logical lines (used by the #Include expander,
+    which joins each file with this module's scanner before splicing).
+
+    ``hoist_functions`` registers function definitions found in nested
+    blocks globally.  Natro places several ``#Include`` directives inside
+    GUI handlers (e.g. ``nm_NectarPriority`` includes ``nm_OpenMenu.ahk``);
+    AHK still exposes those definitions at load time, and the macro calls
+    them from everywhere."""
+    sc = _parse_lines(list(lines), source_map)
+    if hoist_functions:
+        _hoist_nested_functions(sc, sc.auto_section)
+        for fn in list(sc.functions.values()):
+            _hoist_nested_functions(sc, fn.body)
+    return sc
+
+
+def _hoist_nested_functions(sc: Script, nodes: list):
+    """Walk statement bodies and register nested FuncDefs globally."""
+    seen: set[int] = set()
+
+    def walk(items):
+        for node in items or []:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, FuncDef):
+                sc.functions.setdefault(node.name, node)
+            for attr in ("body", "then_body", "else_body", "try_body",
+                         "catch_body", "finally_body"):
+                value = getattr(node, attr, None)
+                if isinstance(value, list):
+                    walk(value)
+            for attr in ("cases",):
+                for case in getattr(node, attr, []) or []:
+                    try:
+                        walk(case[1])
+                    except (TypeError, IndexError):
+                        pass
+
+    walk(nodes)
+
+
+def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
+    sc = Script()
     # hoist #Requires
     for ln in lines:
         if ln.strip().lower().startswith("#requires"):
@@ -1473,6 +1535,11 @@ def parse_script(text: str) -> Script:
             continue
         node, ni = _parse_case_statement(lines, i)
         if node is not None:
+            if source_map is not None and 0 <= i < len(source_map):
+                try:
+                    node._source = source_map[i]
+                except Exception:
+                    pass
             if isinstance(node, FuncDef):
                 sc.functions[node.name] = node
             else:
@@ -1481,6 +1548,11 @@ def parse_script(text: str) -> Script:
             continue
         st = parse_statement(raw)
         if st is not None:
+            if source_map is not None and 0 <= i < len(source_map):
+                try:
+                    st._source = source_map[i]
+                except Exception:
+                    pass
             sc.auto_section.append(st)
         i += 1
     return sc
@@ -1547,8 +1619,17 @@ def _join_continuations(text: str) -> list[str]:
     ending with an operator (`, + - * / . = | & ?`), and lines starting with
     `.` / `,` (method chains / arg continuations). Brace blocks are NOT joined
     (they are real block structure). Returns logical lines."""
+    return _join_continuations_mapped(text)[0]
+
+
+def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
+    """Same as :func:`_join_continuations`, plus the 1-based physical line
+    number where each returned logical line starts. The include loader uses
+    this to preserve source metadata without re-scanning the file."""
     out: list[str] = []
+    starts: list[int] = []
     buf = ""
+    buf_start = 1
     paren = brack = 0
 
     def _strip_code(ln: str, q0=None) -> tuple:
@@ -1580,7 +1661,7 @@ def _join_continuations(text: str) -> list[str]:
 
     cont_q = None
     in_block_comment = False
-    for ln in text.splitlines():
+    for lineno, ln in enumerate(text.splitlines(), 1):
         s = ln.strip()
         if in_block_comment:
             if "*/" in s:
@@ -1593,10 +1674,12 @@ def _join_continuations(text: str) -> list[str]:
         if not s or s.startswith(";"):
             if buf and paren <= 0 and brack <= 0:
                 out.append(buf)
+                starts.append(buf_start)
                 buf = ""
                 paren = brack = 0
             if not buf:
                 out.append(ln)
+                starts.append(lineno)
             continue
         # Quote state carries across ALL lines: multi-line strings are legal
         # (continuation sections), and balanced lines are unaffected by carry.
@@ -1611,6 +1694,7 @@ def _join_continuations(text: str) -> list[str]:
             brack += code.count("[") - code.count("]")
             if paren <= 0 and brack <= 0 and not _open_ends(buf):
                 out.append(buf)
+                starts.append(buf_start)
                 buf = ""
                 paren = brack = 0
             continue
@@ -1641,11 +1725,14 @@ def _join_continuations(text: str) -> list[str]:
                 continue
         if paren > 0 or brack > 0 or _open_ends(s):
             buf = s
+            buf_start = lineno
             continue
         out.append(ln)
+        starts.append(lineno)
     if buf:
         out.append(buf)
-    return out
+        starts.append(buf_start)
+    return out, starts
 
 
 def _ends_open(s: str) -> bool:

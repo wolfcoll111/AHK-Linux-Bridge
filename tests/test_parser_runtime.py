@@ -45,3 +45,36 @@ def test_abort_stops_loop():
         assert False, "should abort"
     except R.Aborted:
         pass
+
+
+def test_braceless_if_does_not_steal_enclosing_else():
+    # Regression: `if atHive()` on its own line followed by `} else {`
+    # used to attach the outer else to the braceless if and swallow the
+    # enclosing block's closing brace. In Natro's nm_Reset that consumed
+    # ~550 lines including the following function definitions.
+    text = (
+        "outer() {\n"
+        "  flag := 0\n"
+        "  if flag {\n"
+        "    loop 1 {\n"
+        "      if false\n"
+        "        x := 1\n"
+        "    }\n"
+        "  } else {\n"
+        "    y := 2\n"
+        "  }\n"
+        "}\n"
+        "after() {\n"
+        "  return 1\n"
+        "}\n"
+        "outer()\n"
+    )
+    sc, rt, sim = run(text)
+    assert "outer" in sc.functions
+    assert "after" in sc.functions
+    outer_if = sc.functions["outer"].body[1]
+    inner_loop = outer_if.then_body[0]
+    assert inner_loop.body[0].else_body == []      # braceless if has no else
+    assert len(outer_if.else_body) == 1            # else belongs to the outer if
+    rt.run_auto()
+    assert rt.vars.get("y") == 2
