@@ -7,8 +7,8 @@ timers, messages, submacro processes, GUI, window/OS bridge, then a live
 Natro proof.
 
 Repo: `/home/lordhats/Documents/Default Project/ahk-linux-bridge`
-Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (`main`,
-pushed through `c3b6fd1`).
+Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (`main`;
+v0.4 code milestone `c3b6fd1`, handoff docs on top).
 Corpus (NOT in repo, stays on this PC): `~/Games/NatroMacro/src` — 150 ×
 `.ahk`, NatroMacro v1.1.2.
 Environment: KDE Plasma 6.7.5 / Wayland, uinput backend, KWin ScreenShot2,
@@ -681,8 +681,9 @@ detail is in this file.
 ```text
 You are taking over AHK-Linux-Bridge in
 /home/lordhats/Documents/Default Project/ahk-linux-bridge (remote
-github.com/wolfcoll111/AHK-Linux-Bridge, branch main, pushed through
-c3b6fd1). Read HANDOFF-v05-full-capability.md in that repo first, and keep
+github.com/wolfcoll111/AHK-Linux-Bridge, branch main; v0.4 code milestone
+c3b6fd1, handoff docs on top). Read HANDOFF-v05-full-capability.md in that
+repo first, and keep
 HANDOFF-v03-natro.md + HANDOFF-v04-vision.md nearby for history. The test
 corpus is ~/Games/NatroMacro/src (150 .ahk files, NatroMacro v1.1.2, not in
 the repo). Environment: KDE Plasma Wayland, uinput, KWin ScreenShot2,
