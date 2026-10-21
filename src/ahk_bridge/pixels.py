@@ -19,6 +19,7 @@ _kwin_lock = threading.Lock()
 _kwin_state = "unknown"  # unknown | ready | unavailable
 _kwin_loop = None
 _kwin_bus = None
+_screen_size = None
 
 
 def find_color(pixels: bytes, w: int, h: int, rgb: tuple[int, int, int], tol: int = 0):
@@ -189,7 +190,8 @@ def _mss_capture(region=None):
     except ImportError as exc:
         raise RuntimeError(
             "pip install 'ahk-linux-bridge[pixels]' for live capture") from exc
-    with mss.mss() as s:
+    opener = getattr(mss, "MSS", None) or mss.mss
+    with opener() as s:
         if region is None:
             shot = s.grab(s.monitors[0])
         else:
@@ -198,17 +200,55 @@ def _mss_capture(region=None):
     return bytes(shot.rgb), shot.width, shot.height
 
 
+def screen_size():
+    """Return ``(left, top, width, height)`` of the virtual desktop.
+
+    Uses mss only for geometry (its pixels are black on Wayland, its monitor
+    list is still correct).  ``(0, 0, 0, 0)`` means unknown.
+    """
+    global _screen_size
+    if _screen_size is None:
+        try:
+            import mss
+            opener = getattr(mss, "MSS", None) or mss.mss
+            with opener() as s:
+                m = s.monitors[0]
+            _screen_size = (int(m["left"]), int(m["top"]),
+                            int(m["width"]), int(m["height"]))
+        except Exception:
+            _screen_size = (0, 0, 0, 0)
+    return _screen_size
+
+
+def _clamp_region(region):
+    """Clamp ``(x, y, w, h)`` to the desktop; None when fully outside."""
+    x, y, width, height = (int(v) for v in region)
+    if width <= 0 or height <= 0:
+        raise ValueError("capture region must have positive size")
+    left, top, desk_w, desk_h = screen_size()
+    if desk_w <= 0 or desk_h <= 0:
+        return (max(0, x), max(0, y), width, height)
+    x2 = min(x + width, left + desk_w)
+    y2 = min(y + height, top + desk_h)
+    x, y = max(x, left), max(y, top)
+    width, height = x2 - x, y2 - y
+    if width <= 0 or height <= 0:
+        return None
+    return (x, y, width, height)
+
+
 def screenshot_rgb(region=None):
     """Capture RGB pixels.  ``region`` is ``(x, y, w, h)`` or None (full screen).
 
     Prefers KWin ScreenShot2 on Wayland (mss reads black there); falls back to
-    mss on X11 or when dbus-next/KWin are unavailable.
+    mss on X11 or when dbus-next/KWin are unavailable.  Regions that go off
+    the desktop are clamped; a fully off-screen region is a 1x1 black frame
+    so callers never throw (Gdip_BitmapFromScreen just gets an empty bitmap).
     """
     if region is not None:
-        x, y, width, height = (int(v) for v in region)
-        if width <= 0 or height <= 0:
-            raise ValueError("capture region must have positive size")
-        region = (max(0, x), max(0, y), width, height)
+        region = _clamp_region(region)
+        if region is None:
+            return b"\x00\x00\x00", 1, 1
     shot = _kwin_capture(region)
     if shot is not None:
         return shot

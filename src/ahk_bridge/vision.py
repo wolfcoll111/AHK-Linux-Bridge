@@ -120,7 +120,13 @@ def _parse_region(region):
     else:
         # A bare number is a screen selector, same as the AHK form.
         return None
-    if len(parts) != 4:
+    if len(parts) < 4:
+        raise ValueError(f"bad region string: {region!r}")
+    # Match the AHK wrapper: StrSplit + S[1..4], so a trailing delimiter
+    # (Natro has one real 5-part call) is harmless; an empty first four
+    # values is what the wrapper rejects with -1.
+    parts = parts[:4]
+    if any(p.strip() == "" for p in parts):
         raise ValueError(f"bad region string: {region!r}")
     return tuple(_as_int(p) for p in parts)
 
@@ -129,10 +135,12 @@ def _crop(image: Image.Image, region):
     if region is None:
         return image.copy()
     x, y, w, h = region
-    x = max(0, x)
-    y = max(0, y)
+    # Clip the far edge before clamping the origin so negative coordinates
+    # shrink the crop (same intersection math as pixels.screenshot_rgb).
     x2 = min(image.width, x + max(0, w))
     y2 = min(image.height, y + max(0, h))
+    x = max(0, x)
+    y = max(0, y)
     if x2 <= x or y2 <= y:
         raise ValueError("region lies outside the bitmap")
     return image.crop((x, y, x2, y2))
@@ -233,7 +241,11 @@ def image_search(haystack, needle, output=None, outer_x1=0, outer_y1=0,
     line_delim = "\n" if line_delim is None else str(line_delim)
     coord_delim = "," if coord_delim is None else str(coord_delim)
 
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise RuntimeError(
+            "pip install 'ahk-linux-bridge[pixels]' for image search") from exc
 
     hw, hh = hay.size
     nw, nh = ndl.size

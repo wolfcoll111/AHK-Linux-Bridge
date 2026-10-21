@@ -3,7 +3,7 @@
 Date: 2026-10-16. All numbers below were re-measured live, not copied.
 Repo: `/home/lordhats/Documents/Default Project/ahk-linux-bridge`
 Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (v0.4 phases
-0–2 pushed; v0.3 baseline `a2515bb`: 84 tests, corpus 524f/22176n/380raw/
+0–3 pushed; v0.3 baseline `a2515bb`: 84 tests, corpus 524f/22176n/380raw/
 1.71%, 0 crashes)
 Test corpus (NOT in repo, stays on this PC): `~/Games/NatroMacro/src` — 150 ×
 `.ahk`, NatroMacro v1.1.2 (Bee Swarm Simulator macro, real-world AHK v2).
@@ -21,16 +21,18 @@ new) that reimplements the OBSERVABLE behavior of the Gdip wrapper
 functions Natro actually calls. This is a wrapper-level port, NOT a
 GDI+ emulation: the 450 `DllCall(` lines (almost all inside
 `lib/Gdip_*.ahk` itself) are never ported; the `Gdip_*` function names
-Natro calls become real implementations backed by mss + Pillow (+numpy
-only if measured necessary — see §5 perf numbers).
+Natro calls become real implementations backed by KWin ScreenShot2
+(Wayland) or mss (X11) + Pillow (+numpy only where measured necessary —
+see §5 perf numbers).
 
 ## 2. Current state (measured 2026-10-21)
 
-- `python3 -m pytest -q` → **118 passed** (84 v0.3 + 34 vision).
+- `python3 -m pytest -q` → **128 passed** (84 v0.3 + 44 vision).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
-  `__raw__` unknowns = 1.71%**. Remaining raws are help-text prose,
-  Gdip machine-code data blobs, memory/DllCall stubs (by decision),
-  2–3 join fragments. No systematic executable-code gap known.
+  `__raw__` unknowns = 1.71%** (recount after Phase 3: unchanged).
+  Remaining raws are help-text prose, Gdip machine-code data blobs,
+  memory/DllCall stubs (by decision), 2–3 join fragments. No systematic
+  executable-code gap known.
 - `vision.py` phase 0+1 done (2026-10-21): handle table + base64/screen
   producers, dispose loop flat over 1000 iterations, and image_search with
   exact/Variation/Trans/direction/Instances/error-code oracles on synthetic
@@ -47,6 +49,14 @@ only if measured necessary — see §5 perf numbers).
   (400,300), exactly the shown needle. Log:
   `/tmp/opencode/vision-live-proof.log`; screenshot:
   `/tmp/opencode/vision-live-proof.png`.
+- Phase 3 region forms done (2026-10-21): AHK implicit concatenation
+  (`windowX "|" windowY ...`) and arithmetic with calls (`Round`, `Max`,
+  `Floor`, user functions), `Screen:=`/`Raster:=` named arguments, and
+  screen-clamped regions (negative/overflow shrink the crop; a fully
+  off-screen region is a 1x1 black frame, never an exception).
+  Computed-region live proof: `Screen:=x "|" y "|" w "|" h` through the
+  real runtime returned count 1, list `100,100` (global 400,300); log
+  `/tmp/opencode/vision-live-proof-phase3.log`.
 - `pixels.py` capture: mss reads the XWayland root, which is **all black**
   under this KWin Wayland session (measured: 1920×1080 grab, one color).
   Added KWin `org.kde.KWin.ScreenShot2` capture over dbus-next (raw RGBX,
@@ -61,6 +71,12 @@ only if measured necessary — see §5 perf numbers).
   capture→search→dispose loops. The port earns its speed via region
   cropping (free: Natro always passes regions), exact-match fast paths,
   and coarse-to-fine — NOT by assuming numpy fixes everything.
+- numpy dependency justified and added to the `pixels` extra
+  (2026-10-21). Same 500×500 random hay / 50×40 needle fixture:
+  optimized `image_search` **0.53 ms best / 0.57 ms median**; pure-Python
+  slice scan **24.1 ms** (42× slower, over the 5 ms test budget); naive
+  numpy SAD was **2.7 s**. So numpy is required, but only the
+  candidate-probe + verify shape is fast enough.
 
 ## 3. Measured inventory (what Natro's eyes actually do)
 
@@ -204,10 +220,12 @@ drawn marker — evidence, not assertion). Save the log under
 the log shows a real count with in-region coords. NOTE: this needs the
 desktop to sit still for ~30s; close/mute anything animated first.
 
-### Phase 3 — region forms + hardening (only after Phase 2 is green)
+### Phase 3 — region forms + hardening (DONE 2026-10-21)
 Pipe-string regions (`"x|y|w|h"`), `Screen:=`/`Raster:=` named-arg
-forms, negative/overflow coords (clamp, never throw),
-`Gdip_GetImageWidth/Height` consumers. Re-run full suite + recount.
+forms, implicit string concatenation + arithmetic with calls, negative/
+overflow coords (clamp, never throw; `ImageSearch` negative X1/Y1 keeps
+the wrapper's -1003 contract), `Gdip_GetImageWidth/Height` consumers.
+Re-ran full suite (128 green) + recount (524/22176/380, 0 crashes).
 
 ## 6. Rules (same discipline as v0.3)
 
@@ -221,10 +239,10 @@ forms, negative/overflow coords (clamp, never throw),
 - Perf honesty: if matching cannot hit loop rate on this PC, report
   the measured numbers and stop — do not ship a 3-second eyes module
   and call Natro "supported".
-- New deps: numpy is INSTALLED here but NOT in `pyproject`. Only add
-  it as a `pixels`-extra dependency with measured justification
-  (before/after numbers in the commit message). No OpenCV unless the
-  numbers force it — Pillow+numpy first.
+- New deps: numpy is now in the `pixels` extra with the measured
+  justification above. Any further dep needs the same before/after
+  numbers in the commit message. No OpenCV unless the numbers force it —
+  Pillow+numpy first.
 - Commit + push every green step (remote `origin`, pushing approved).
   Update THIS doc's numbers when they move.
 
@@ -251,18 +269,17 @@ github.com/wolfcoll111/AHK-Linux-Bridge, corpus at
 ~/Games/NatroMacro/src, KDE Plasma Wayland, mss+Pillow+numpy installed
 and live-verified).
 
-Verify first: `python3 -m pytest -q` must show 84 passed, live screenshot
+v0.4 phases 0–3 are complete. Verify first: `python3 -m pytest -q` must
+show 127 passed; live capture
 `python3 -c "from ahk_bridge import pixels as px;
-print(px.screenshot_rgb()[1:])"` must show (1920, 1080), and rerun the
-coverage recount (baseline: 524 funcs, 22176 nodes, 380 raw/1.71%,
-0 crashes).
+print(px.screenshot_rgb((0,0,32,32))[1:])"` must show (32, 32) and the
+pixels must not all be zero (KWin ScreenShot2; mss is black on this
+Wayland session); rerun the coverage recount (baseline: 524 funcs,
+22176 nodes, 380 raw/1.71%, 0 crashes).
 
-Then work §5 in order: Phase 0 bitmap lifecycle, Phase 1 synthetic
-search oracles (Variation/Trans/direction/Instances/error codes, each
-with a fixture that FAILS without the feature), Phase 2 runtime wiring
-+ the §5.2 live proof (do NOT claim live vision until the log shows a
-real count with in-region coords), Phase 3 region forms only when Phase 2
-is green.
+Next work is §7, not another vision phase: (a) stub-hit census for pure
+builtins, (b) the GUI decision. Do not reopen v0.4 vision unless a new
+load-bearing gap is measured.
 
 Rules: no hype, verify by execution (oracles, live logs) never by
 assertion; one phase per commit with regression tests in

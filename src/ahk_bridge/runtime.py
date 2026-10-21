@@ -434,8 +434,24 @@ class Runtime:
                 self.logs.append(f"Gdip_BitmapFromBase64 failed: {exc}")
                 return 0
         if low == "gdip_bitmapfromscreen":
+            # Gdip_BitmapFromScreen(Screen:=0, Raster:="") accepts v1-style
+            # named arguments.  Scan instead of evaluating the raw text so
+            # `Screen`/`Raster` never leak into script variables.
+            screen_arg, named = None, False
+            for a in args:
+                m = re.match(r"(?i)^\s*Screen\s*:=\s*(.*)$", a, re.DOTALL)
+                if m:
+                    screen_arg, named = m.group(1).strip(), True
+                    break
+            if not named:
+                first = raw(0)
+                if re.match(r"(?i)^\s*Raster\s*:=", first):
+                    screen_arg = ""
+                else:
+                    screen_arg = first
             try:
-                return vision.from_screen(val(0, None))
+                region = self._eval_expr(screen_arg) if screen_arg.strip() else None
+                return vision.from_screen(region)
             except Exception as exc:
                 self.logs.append(f"Gdip_BitmapFromScreen failed: {exc}")
                 return 0
@@ -1371,8 +1387,9 @@ class Runtime:
         s = s.strip()
         if s == "":
             return ""
-        # quoted string literal
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        # quoted string literal (the closing quote must be the last char;
+        # `"a" x "b"` is implicit concatenation, not one literal)
+        if self._is_whole_quoted(s):
             inner = s[1:-1]
             return self._interp(inner)
         # strip one layer of redundant wrapping parens: ((x)), (go("a")).
@@ -1476,6 +1493,12 @@ class Runtime:
         _and_parts = self._split_logic(s, "&&")
         if len(_and_parts) > 1:
             return 1 if all(self._cond(p) for p in _and_parts) else 0
+        # arithmetic containing calls or parenthesized subexpressions:
+        # `windowY + GetYOffset(hwnd) + 36`, `windowX + Round(...)`.
+        if "(" in s:
+            num = self._eval_arith(s)
+            if num is not None:
+                return num
         # safe integer arithmetic with vars substituted
         try:
             tree = ast.parse(s, mode="eval")
@@ -1483,6 +1506,16 @@ class Runtime:
             return val
         except Exception:
             pass
+        # AHK implicit concatenation: `x "|" y "|" w "|" h`.  Every term
+        # must be clearly evaluable, so unknown prose keeps its literal
+        # fallback instead of turning into a row of zeros.  Run before the
+        # comparison check: a region term may contain `(a >= b ? x : y)`.
+        parts = self._split_concat(s)
+        if len(parts) > 1 and all(self._term_is_known(p) for p in parts):
+            try:
+                return "".join(str(self._eval_expr(p)) for p in parts)
+            except Exception:
+                pass
         # comparisons / regex-match in value position: `ok := (a >= b)`.
         if _has_cmp_op(s):
             try:
@@ -1505,6 +1538,253 @@ class Runtime:
         if re.match(r"^[A-Za-z_]\w*$", s):
             return self.vars.get(s, 0)
         return s
+
+    @staticmethod
+    def _is_whole_quoted(s: str) -> bool:
+        """True when ``s`` is one quoted literal (closing quote at the end)."""
+        if len(s) < 2 or s[0] not in ('"', "'"):
+            return False
+        quote, k = s[0], 1
+        while k < len(s):
+            if s[k] == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if s[k] == quote:
+                return k == len(s) - 1
+            k += 1
+        return False
+
+    @staticmethod
+    def _split_concat(s: str) -> list:
+        """Split AHK implicit concatenation at top-level spaces.
+
+        A boundary is whitespace between two atom characters (`x "|" y`) and
+        never whitespace next to an operator (`a + b` stays one term).
+        """
+        parts, start, depth, quote = [], 0, 0, None
+        k = 0
+        while k < len(s):
+            ch = s[k]
+            if quote:
+                if ch == "`" and k + 1 < len(s):
+                    k += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                k += 1
+                continue
+            if ch == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                k += 1
+                continue
+            if ch in "([{":
+                depth += 1
+                k += 1
+                continue
+            if ch in ")]}":
+                depth = max(0, depth - 1)
+                k += 1
+                continue
+            if ch.isspace() and depth == 0:
+                j = k
+                while j < len(s) and s[j].isspace():
+                    j += 1
+                if j >= len(s):
+                    break
+                prev, nxt = s[k - 1], s[j]
+                atom_prev = prev.isalnum() or prev in '_)]}"\''
+                atom_next = nxt.isalnum() or nxt in '_([{"\''
+                if atom_prev and atom_next:
+                    piece = s[start:k].strip()
+                    if piece:
+                        parts.append(piece)
+                    start = j
+                k = j
+                continue
+            k += 1
+        if parts:
+            piece = s[start:].strip()
+            if piece:
+                parts.append(piece)
+        if any(p.lower() in ("not", "and", "or") for p in parts):
+            return []
+        return parts
+
+    def _term_is_known(self, term: str) -> bool:
+        """True for literals, vars, calls, and arithmetic; false for prose."""
+        term = term.strip()
+        if not term:
+            return False
+        if term[0] in ('"', "'", "(", "[", "{"):
+            return True
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", term):
+            return True
+        if re.fullmatch(r"[A-Za-z_]\w*", term):
+            return term in self.vars
+        if re.search(r"[+\-*/%]", term):
+            return True
+        if re.match(r"^[A-Za-z_]\w*\s*\(", term):
+            return True
+        if re.search(r"\[[^\]]+\]", term):
+            return True
+        return False
+
+    @staticmethod
+    def _find_call(s: str):
+        """Return the last (innermost) ``Name(...)`` call outside quotes."""
+        quote, found, k = None, [], 0
+        while k < len(s):
+            ch = s[k]
+            if quote:
+                if ch == "`" and k + 1 < len(s):
+                    k += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                k += 1
+                continue
+            if ch == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                k += 1
+                continue
+            m = re.match(r"([A-Za-z_]\w*)\s*\(", s[k:])
+            if m:
+                start = k
+                open_idx = k + m.end() - 1
+                depth, inner_q, j = 1, None, open_idx + 1
+                while j < len(s) and depth:
+                    c = s[j]
+                    if inner_q:
+                        if c == inner_q:
+                            inner_q = None
+                    elif c in ('"', "'"):
+                        inner_q = c
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                    j += 1
+                if depth == 0:
+                    found.append((m.group(1), s[open_idx + 1:j - 1], start, j))
+                    k = j
+                    continue
+            k += 1
+        return found[-1] if found else None
+
+    @staticmethod
+    def _find_paren_group(s: str):
+        """Return the first closed ``(...)`` group outside quotes."""
+        quote, stack, k = None, [], 0
+        while k < len(s):
+            ch = s[k]
+            if quote:
+                if ch == "`" and k + 1 < len(s):
+                    k += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                k += 1
+                continue
+            if ch == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                k += 1
+                continue
+            if ch == "(":
+                stack.append(k)
+            elif ch == ")" and stack:
+                start = stack.pop()
+                return start, k + 1, s[start + 1:k]
+            k += 1
+        return None
+
+    @staticmethod
+    def _num_literal(value):
+        """Format a numeric value as an AST literal, or None if non-numeric."""
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, (int, float)):
+            return repr(value)
+        if isinstance(value, str):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return repr(int(number)) if number.is_integer() else repr(number)
+        return None
+
+    def _eval_arith(self, s: str):
+        """Evaluate arithmetic with calls/parenthesized groups, else None.
+
+        Python's AST does the operator precedence; this only replaces AHK
+        calls (`Round(...)`, `GetYOffset(hwnd)`) and parenthesized
+        subexpressions (which may be ternaries) with numeric literals.
+        """
+        from .parser import _split_seq as _ss
+        s = s.strip()
+        for _ in range(50):
+            call = self._find_call(s)
+            if call is None:
+                break
+            name, argstr, start, end = call
+            raw = [p.strip() for p in _ss(argstr)] if argstr.strip() else []
+            args = [self._eval_expr(p) for p in raw if p != ""]
+            try:
+                value = self._call_value(P.FuncCall(name, args))
+            except Exception:
+                return None
+            literal = self._num_literal(value)
+            if literal is None:
+                return None
+            s = s[:start] + literal + s[end:]
+        for _ in range(50):
+            group = self._find_paren_group(s)
+            if group is None:
+                break
+            start, end, inner = group
+            value = self._eval_expr(inner)
+            literal = self._num_literal(value)
+            if literal is None:
+                return None
+            s = s[:start] + literal + s[end:]
+        out, k, quote = [], 0, None
+        while k < len(s):
+            ch = s[k]
+            if quote:
+                out.append(ch)
+                if ch == quote:
+                    quote = None
+                k += 1
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                out.append(ch)
+                k += 1
+                continue
+            m = re.match(r"[A-Za-z_]\w*", s[k:])
+            if m:
+                name = m.group(0)
+                literal = self._num_literal(self.vars.get(name, 0))
+                if literal is None:
+                    return None
+                out.append(literal)
+                k += len(name)
+                continue
+            out.append(ch)
+            k += 1
+        try:
+            tree = ast.parse("".join(out), mode="eval")
+            return self._safe_eval(tree.body)
+        except Exception:
+            return None
 
     def _safe_eval(self, node):
         import operator as _op

@@ -504,3 +504,172 @@ def test_from_screen_live_path_uses_pixels_capture(monkeypatch):
         assert image.getpixel((0, 0))[:3] == (200, 100, 50)
     finally:
         vision.dispose(handle)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: region forms, implicit concatenation, clamping.
+# ---------------------------------------------------------------------------
+
+def _capture_regions(monkeypatch, text):
+    """Run ``text`` and record every region passed to from_screen."""
+    from ahk_bridge.parser import parse_script
+    from ahk_bridge.runtime import Runtime
+    from ahk_bridge.backends.dry_backend import DryBackend
+
+    seen = []
+
+    def fake_from_screen(region=None):
+        seen.append(region)
+        return vision._register(Image.new("RGB", (4, 4), (0, 0, 0)))
+
+    monkeypatch.setattr(vision, "from_screen", fake_from_screen)
+    rt = Runtime(parse_script(text), DryBackend())
+    rt.run_auto()
+    return seen, rt
+
+
+def test_region_expression_implicit_concat(monkeypatch):
+    text = (
+        'windowX := 100\nwindowY := 50\nwindowWidth := 800\nwindowHeight := 400\n'
+        'offsetY := 10\n'
+        'Gdip_BitmapFromScreen(windowX "|" windowY "|" windowWidth "|" windowHeight)\n'
+        'Gdip_BitmapFromScreen(windowX+30 "|" windowY+offsetY+180 "|30|400")\n'
+    )
+    seen, _ = _capture_regions(monkeypatch, text)
+    assert seen == ["100|50|800|400", "130|240|30|400"]
+
+
+def test_region_expression_calls_and_arithmetic(monkeypatch):
+    text = (
+        'windowX := 100\nwindowY := 50\nwindowWidth := 800\nwindowHeight := 400\n'
+        'offsetY := 10\n'
+        'Gdip_BitmapFromScreen(windowX "|" windowY+offsetY+150 "|" '
+        'windowWidth//2 "|" Max(480, windowHeight-offsetY-150))\n'
+        'Gdip_BitmapFromScreen(windowX + Round(0.5 * windowWidth - 320) "|" '
+        'windowY + offsetY + Round(0.4 * windowHeight + 17) "|210|90")\n'
+    )
+    seen, _ = _capture_regions(monkeypatch, text)
+    assert seen == ["100|210|400|480", "180.0|237.0|210|90"]
+
+
+def test_region_expression_ternary_and_user_function(monkeypatch):
+    text = (
+        'windowX := 100\nwindowY := 50\nwindowWidth := 800\nwindowHeight := 400\n'
+        'offsetY := 10\n'
+        'GetYOffset(*) => 77\n'
+        'Gdip_BitmapFromScreen(windowX "|" windowY + GetYOffset() + 36 "|" '
+        'windowWidth "|" 38)\n'
+        'Gdip_BitmapFromScreen(windowX + windowWidth - 8 - '
+        '(windowWidth>=1195 ? 475 : windowWidth/2.5) "|" '
+        'windowY+offsetY+40 "|" (windowWidth>=1195 ? 475 : windowWidth/2.5) "|" '
+        '(windowHeight>=1156 ? 334 : windowHeight/3.464))\n'
+    )
+    seen, _ = _capture_regions(monkeypatch, text)
+    assert seen[0] == "100|163|800|38"
+    assert seen[1].startswith("572.0|100|320.0|")
+
+
+def test_implicit_concat_does_not_eat_prose_or_comparisons():
+    from ahk_bridge.parser import parse_script
+    from ahk_bridge.runtime import Runtime
+    from ahk_bridge.backends.dry_backend import DryBackend
+    rt = Runtime(parse_script(""), DryBackend())
+    rt.vars.update({"a": 1, "b": 2})
+    assert rt._eval_expr('a "|" b') == "1|2"
+    assert rt._eval_expr("some prose here") == "some prose here"
+    assert rt._eval_expr("a some prose") == "a some prose"
+    assert rt._eval_expr("a = 1") == 1
+    assert rt._eval_expr("a >= 2 ? \"yes\" : \"no\"") == "no"
+
+
+def test_runtime_bitmap_from_screen_named_args(monkeypatch):
+    seen = []
+
+    def fake_from_screen(region=None):
+        seen.append(region)
+        return vision._register(Image.new("RGB", (4, 4), (0, 0, 0)))
+
+    monkeypatch.setattr(vision, "from_screen", fake_from_screen)
+    from ahk_bridge.parser import parse_script
+    from ahk_bridge.runtime import Runtime
+    from ahk_bridge.backends.dry_backend import DryBackend
+    text = (
+        'windowX := 10\n'
+        'hay := Gdip_BitmapFromScreen(Screen:="10|20|30|40", Raster:="SRCCOPY")\n'
+        'hay2 := Gdip_BitmapFromScreen(Screen:=windowX "|" 20 "|" 30 "|" 40)\n'
+        'hay3 := Gdip_BitmapFromScreen(Raster:="SRCCOPY")\n'
+        'hay4 := Gdip_BitmapFromScreen(0, "SRCCOPY")\n'
+    )
+    rt = Runtime(parse_script(text), DryBackend())
+    rt.run_auto()
+    assert seen == ["10|20|30|40", "10|20|30|40", None, 0]  # 0 = whole screen
+    assert "Screen" not in rt.vars and "Raster" not in rt.vars
+
+
+def test_screenshot_clamps_region_to_screen(monkeypatch):
+    seen = []
+    black = (b"\x00\x00\x00", 1, 1)
+    monkeypatch.setattr(pixels, "screen_size", lambda: (0, 0, 1920, 1080))
+    monkeypatch.setattr(pixels, "_kwin_capture",
+                        lambda region=None: seen.append(region) or black)
+    monkeypatch.setattr(pixels, "_mss_capture",
+                        lambda region=None: (_ for _ in ()).throw(
+                            AssertionError("mss used")))
+    assert pixels.screenshot_rgb((-10, -20, 100, 100)) == black
+    assert seen[-1] == (0, 0, 90, 80)
+    assert pixels.screenshot_rgb((1900, 1000, 100, 100)) == black
+    assert seen[-1] == (1900, 1000, 20, 80)
+    assert pixels.screenshot_rgb((2000, 2000, 100, 100)) == black
+    assert len(seen) == 2  # fully outside never reaches the grabber
+
+
+def test_from_screen_live_path_clamps_negative_region(monkeypatch):
+    monkeypatch.setattr(pixels, "screen_size", lambda: (0, 0, 100, 80))
+    seen = []
+
+    def fake_capture(region=None):
+        seen.append(region)
+        x, y, w, h = region
+        return (b"\x00" * (w * h * 3), w, h)
+
+    monkeypatch.setattr(pixels, "_kwin_capture", fake_capture)
+    handle = vision.from_screen("-10|-20|100|100")
+    try:
+        assert seen == [(0, 0, 90, 80)]
+        assert vision.dimensions(handle) == (90, 80)
+    finally:
+        vision.dispose(handle)
+
+
+def test_image_search_overflow_outer_coords_clamp():
+    needle = _pattern(5, 4, seed=61)
+    canvas = _paste(Image.new("RGB", (60, 50), (1, 2, 3)), needle, 20, 10)
+    hay = vision._register(canvas)
+    ndl = vision._register(needle)
+    try:
+        assert vision.image_search(hay, ndl, outer_x2=10 ** 6,
+                                   outer_y2=10 ** 6) == (1, "20,10")
+        assert vision.image_search(hay, ndl, outer_x1=10 ** 6) == (0, "")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_from_screen_grabber_clips_negative_region_like_live():
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    handle = vision.from_screen("-10|-20|100|100", grabber=lambda: canvas)
+    try:
+        assert vision.dimensions(handle) == (90, 80)
+    finally:
+        vision.dispose(handle)
+
+
+def test_region_trailing_delimiter_matches_ahk_wrapper():
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    handle = vision.from_screen("10|20|30|40|", grabber=lambda: canvas)
+    try:
+        assert vision.dimensions(handle) == (30, 40)
+    finally:
+        vision.dispose(handle)
+    with pytest.raises(ValueError):
+        vision.from_screen("10|20|30|", grabber=lambda: canvas)
