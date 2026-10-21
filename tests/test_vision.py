@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from ahk_bridge import vision
+from ahk_bridge import pixels, vision
 
 CORPUS = Path.home() / "Games" / "NatroMacro" / "src"
 BITMAPS = CORPUS / "nm_image_assets" / "general" / "bitmaps.ahk"
@@ -443,3 +443,64 @@ def test_runtime_unknown_gdip_stub_logs_once(monkeypatch):
     rt = _run_script(text, monkeypatch, canvas)
     hits = [line for line in rt.logs if "stub Gdip_FillRectangle()" in line]
     assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: live capture path.  mss returns black under KWin Wayland, so the
+# default grabber is KWin ScreenShot2 (raw QImage decode) with mss fallback.
+# ---------------------------------------------------------------------------
+
+def test_kwin_decode_rgbx_and_bgra():
+    # 2x1 RGBX8888 (format 16, observed from Plasma 6.8): R,G,B,X per pixel.
+    rgbx = bytes([10, 20, 30, 255, 40, 50, 60, 255])
+    assert pixels._decode_kwin(rgbx, 2, 1, 8, 16) == (
+        bytes([10, 20, 30, 40, 50, 60]), 2, 1)
+    # 2x1 BGRA (format 5): B,G,R,A per pixel.
+    bgra = bytes([30, 20, 10, 255, 60, 50, 40, 255])
+    assert pixels._decode_kwin(bgra, 2, 1, 8, 5) == (
+        bytes([10, 20, 30, 40, 50, 60]), 2, 1)
+    # 2x1 RGB888 (format 13): tightly packed R,G,B.
+    rgb = bytes([10, 20, 30, 40, 50, 60])
+    assert pixels._decode_kwin(rgb, 2, 1, 6, 13) == (
+        bytes([10, 20, 30, 40, 50, 60]), 2, 1)
+
+
+def test_kwin_decode_rejects_short_buffer():
+    with pytest.raises(ValueError):
+        pixels._decode_kwin(b"\x00" * 7, 2, 1, 8, 16)
+
+
+def test_screenshot_prefers_kwin_then_mss(monkeypatch):
+    shot = (b"\x01\x02\x03", 1, 1)
+    monkeypatch.setattr(pixels, "_kwin_capture", lambda region=None: shot)
+
+    def no_mss(region=None):
+        raise AssertionError("mss used when KWin succeeded")
+
+    monkeypatch.setattr(pixels, "_mss_capture", no_mss)
+    assert pixels.screenshot_rgb((0, 0, 1, 1)) == shot
+
+    monkeypatch.setattr(pixels, "_kwin_capture", lambda region=None: None)
+    monkeypatch.setattr(pixels, "_mss_capture", lambda region=None: shot)
+    assert pixels.screenshot_rgb() == shot
+
+
+def test_from_screen_live_path_uses_pixels_capture(monkeypatch):
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    canvas.putpixel((10, 20), (200, 100, 50))
+    seen = {}
+
+    def fake_capture(region=None):
+        seen["region"] = region
+        x, y, w, h = region
+        return canvas.crop((x, y, x + w, y + h)).tobytes(), w, h
+
+    monkeypatch.setattr(pixels, "screenshot_rgb", fake_capture)
+    handle = vision.from_screen("10|20|30|40")
+    try:
+        image = vision._get(handle)
+        assert seen["region"] == (10, 20, 30, 40)
+        assert image.size == (30, 40)
+        assert image.getpixel((0, 0))[:3] == (200, 100, 50)
+    finally:
+        vision.dispose(handle)

@@ -2,8 +2,9 @@
 
 Date: 2026-10-16. All numbers below were re-measured live, not copied.
 Repo: `/home/lordhats/Documents/Default Project/ahk-linux-bridge`
-Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (last push:
-v0.3 `a2515bb`: 84 tests green, corpus 524f/22176n/380raw/1.71%, 0 crashes)
+Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (v0.4 phases
+0–2 pushed; v0.3 baseline `a2515bb`: 84 tests, corpus 524f/22176n/380raw/
+1.71%, 0 crashes)
 Test corpus (NOT in repo, stays on this PC): `~/Games/NatroMacro/src` — 150 ×
 `.ahk`, NatroMacro v1.1.2 (Bee Swarm Simulator macro, real-world AHK v2).
 Env: KDE Plasma 6.7.5 / Wayland, uinput backend, mss + Pillow 12.3.0 +
@@ -23,9 +24,9 @@ GDI+ emulation: the 450 `DllCall(` lines (almost all inside
 Natro calls become real implementations backed by mss + Pillow (+numpy
 only if measured necessary — see §5 perf numbers).
 
-## 2. Current state (measured 2026-10-16)
+## 2. Current state (measured 2026-10-21)
 
-- `python3 -m pytest -q` → **114 passed** (84 v0.3 + 30 vision).
+- `python3 -m pytest -q` → **118 passed** (84 v0.3 + 34 vision).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
   `__raw__` unknowns = 1.71%**. Remaining raws are help-text prose,
   Gdip machine-code data blobs, memory/DllCall stubs (by decision),
@@ -39,11 +40,19 @@ only if measured necessary — see §5 perf numbers).
   Gdip_* calls execute through the parser/runtime, `&OutputList` and
   `&w/&h` write `vars`, positional omitted args stay in their slots,
   dispose returns the table to baseline, unknown Gdip_* log one stub each.
-  Live proof (§5.2): not yet.
-- `pixels.py` today: `find_color[_in_region]` (pure Python, tested) +
-  `screenshot_rgb()` via mss. Live-verified this session: **1920×1080
-  screenshot in one call**. No portal/PipeWire capture (docstring promise
-  only); mss works here through XWayland.
+- §5.2 live proof (2026-10-21): Natro's `royaljelly.png` (108×28) shown
+  1:1 at screen (400,300), window geometry confirmed by xdotool. The AHK
+  script captured `300|200|400|300` through the real runtime and
+  `Gdip_ImageSearch` returned **count 1, list `100,100`** — global
+  (400,300), exactly the shown needle. Log:
+  `/tmp/opencode/vision-live-proof.log`; screenshot:
+  `/tmp/opencode/vision-live-proof.png`.
+- `pixels.py` capture: mss reads the XWayland root, which is **all black**
+  under this KWin Wayland session (measured: 1920×1080 grab, one color).
+  Added KWin `org.kde.KWin.ScreenShot2` capture over dbus-next (raw RGBX,
+  no portal prompt): 500×500 region **2.4–3.5 ms**, full screen **~33 ms**,
+  pixel-exact against a displayed PNG. mss remains the X11 fallback.
+  `dbus-next` added to the `pixels` extra (already used by `portal`).
 - Speed baselines measured live on this PC (1920×1080 desktop):
   pure-Python `find_color` fullscreen **0.42s**; naive numpy
   sliding-window SAD fullscreen **~5.7s**, 500×500 region **~2.7s**.

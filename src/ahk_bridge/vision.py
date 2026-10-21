@@ -143,7 +143,8 @@ def from_screen(region=None, grabber=None) -> int:
 
     ``grabber`` is an injection point for deterministic tests: it returns a
     full-screen PIL image, which is then cropped with the same math used for
-    live captures.  Live captures use mss directly on the requested region.
+    live captures.  Live captures go through ``pixels.screenshot_rgb``, which
+    uses KWin ScreenShot2 on Wayland and mss on X11.
     """
     parsed = _parse_region(region)
     if grabber is not None:
@@ -151,21 +152,9 @@ def from_screen(region=None, grabber=None) -> int:
         if not isinstance(image, Image.Image):
             raise TypeError("grabber must return a Pillow Image")
         return _register(_crop(image, parsed))
-    try:
-        import mss
-    except ImportError as exc:  # pragma: no cover - depends on host install
-        raise RuntimeError(
-            "pip install 'ahk-linux-bridge[pixels]' for live capture") from exc
-    with mss.mss() as s:
-        if parsed is None:
-            shot = s.grab(s.monitors[0])
-        else:
-            x, y, w, h = parsed
-            x, y = max(0, x), max(0, y)
-            if w <= 0 or h <= 0:
-                raise ValueError("capture region must have positive size")
-            shot = s.grab({"left": x, "top": y, "width": w, "height": h})
-    image = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
+    from . import pixels as _pixels
+    rgb, width, height = _pixels.screenshot_rgb(parsed)
+    image = Image.frombytes("RGB", (width, height), rgb)
     return _register(image)
 
 

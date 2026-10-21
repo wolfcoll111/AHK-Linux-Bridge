@@ -13,7 +13,7 @@ ahk-bridge = "ahk_bridge.cli:main"
 uinput = ["evdev>=1.6"]
 x11 = ["python-xlib>=0.33"]
 portal = ["dbus-next>=0.2"]
-pixels = ["mss>=9.0", "Pillow>=10.0"]
+pixels = ["mss>=9.0", "Pillow>=10.0", "dbus-next>=0.2"]
 test = ["pytest>=7.0"]
 
 [build-system]

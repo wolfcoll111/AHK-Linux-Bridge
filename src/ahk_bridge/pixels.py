@@ -1,6 +1,24 @@
-"""Pixel search. Wayland path: PipeWire ScreenCast via portal (needs user consent);
-X11 path: mss/shm. v0.1 ships the search math + mss hook; portal capture lands in v0.2."""
+"""Pixel search + live screen capture.
+
+Wayland/KDE: ``org.kde.KWin.ScreenShot2`` over D-Bus returns raw pixels with
+no portal prompt.  X11/other: mss/shm.  The KWin path needs ``dbus-next``
+(part of the ``pixels`` extra); without it we fall back to mss.
+
+Why not mss on Wayland: mss reads the XWayland root window, which a
+compositing Wayland session leaves black.  Measured on this PC: a full
+1920x1080 mss grab is 8 MB of zeros, while KWin ScreenShot2 returns the real
+desktop (verified pixel-for-pixel against a shown PNG).
+"""
 from __future__ import annotations
+
+import asyncio
+import os
+import threading
+
+_kwin_lock = threading.Lock()
+_kwin_state = "unknown"  # unknown | ready | unavailable
+_kwin_loop = None
+_kwin_bus = None
 
 
 def find_color(pixels: bytes, w: int, h: int, rgb: tuple[int, int, int], tol: int = 0):
@@ -29,12 +47,169 @@ def find_color_in_region(pixels: bytes, w: int, h: int, rgb: tuple[int, int, int
     return None
 
 
-def screenshot_rgb():
-    """Hook for mss. Raises with install hint if missing."""
+def _kwin_start() -> bool:
+    """Connect to KWin's ScreenShot2 service once, on a daemon event loop."""
+    global _kwin_state, _kwin_loop, _kwin_bus
+    if _kwin_state != "unknown":
+        return _kwin_state == "ready"
+    with _kwin_lock:
+        if _kwin_state != "unknown":
+            return _kwin_state == "ready"
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            _kwin_state = "unavailable"
+            return False
+        try:
+            from dbus_next.aio import MessageBus
+        except ImportError:
+            _kwin_state = "unavailable"
+            return False
+        ready = threading.Event()
+        result: dict = {}
+
+        def runner():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                bus = loop.run_until_complete(
+                    MessageBus(negotiate_unix_fd=True).connect())
+                result["bus"] = bus
+                result["loop"] = loop
+            except Exception as exc:  # pragma: no cover - host dependent
+                result["error"] = exc
+            finally:
+                ready.set()
+            if "bus" in result:
+                loop.run_forever()
+                result["bus"].disconnect()
+                loop.close()
+
+        threading.Thread(target=runner, daemon=True, name="kwin-capture").start()
+        if not ready.wait(timeout=5) or "bus" not in result:
+            _kwin_state = "unavailable"
+            return False
+        _kwin_loop = result["loop"]
+        _kwin_bus = result["bus"]
+        _kwin_state = "ready"
+        return True
+
+
+def _decode_kwin(data: bytes, width: int, height: int, stride: int,
+                 fmt: int) -> tuple[bytes, int, int]:
+    """Decode KWin's raw QImage buffer to tightly packed RGB bytes.
+
+    KWin returns QImage formats: 16 is RGBX8888 (observed on Plasma 6.8),
+    4/5/6 are BGRA in memory, 13 is RGB888 and 29 is BGR888.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("capture has empty size")
+    if stride < width * 3 or len(data) < stride * height:
+        raise ValueError("short KWin capture buffer")
+    from PIL import Image
+
+    if stride == width * 4:
+        mode = "BGRA" if fmt in (4, 5, 6) else "RGBA"
+        image = Image.frombuffer("RGBA", (width, height), data,
+                                 "raw", mode, stride, 1)
+        return image.convert("RGB").tobytes(), width, height
+    if stride == width * 3:
+        mode = "BGR" if fmt == 29 else "RGB"
+        image = Image.frombuffer("RGB", (width, height), data,
+                                 "raw", mode, stride, 1)
+        return image.tobytes(), width, height
+    raise ValueError(f"unsupported KWin stride {stride} for width {width}")
+
+
+def _kwin_capture(region=None):
+    """Capture via KWin ScreenShot2.  Returns (rgb, w, h) or None."""
+    if not _kwin_start():
+        return None
+    from dbus_next import Message, MessageType
+
+    read_fd, write_fd = os.pipe()
+    chunks: list[bytes] = []
+
+    def reader():
+        try:
+            while True:
+                chunk = os.read(read_fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(read_fd)
+
+    thread = threading.Thread(target=reader, daemon=True, name="kwin-read")
+    thread.start()
+    if region is None:
+        member, signature, body = "CaptureActiveScreen", "a{sv}h", [{}, 0]
+    else:
+        x, y, width, height = (int(v) for v in region)
+        member, signature, body = (
+            "CaptureArea", "iiuua{sv}h", [x, y, width, height, {}, 0])
+    try:
+        msg = Message(
+            destination="org.kde.KWin",
+            path="/org/kde/KWin/ScreenShot2",
+            interface="org.kde.KWin.ScreenShot2",
+            member=member,
+            signature=signature,
+            body=body,
+            unix_fds=[write_fd],
+        )
+        future = asyncio.run_coroutine_threadsafe(_kwin_bus.call(msg), _kwin_loop)
+        reply = future.result(timeout=10)
+    except Exception:
+        return None
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+    thread.join(timeout=5)
+    if reply.message_type != MessageType.METHOD_RETURN:
+        return None
+    try:
+        results = reply.body[0]
+        width = int(results["width"].value)
+        height = int(results["height"].value)
+        stride = int(results["stride"].value)
+        fmt = int(results["format"].value)
+    except (IndexError, KeyError, AttributeError, TypeError):
+        return None
+    try:
+        return _decode_kwin(b"".join(chunks), width, height, stride, fmt)
+    except ValueError:
+        return None
+
+
+def _mss_capture(region=None):
+    """X11/fallback capture.  Returns (rgb, w, h)."""
     try:
         import mss
-    except ImportError as e:
-        raise RuntimeError("pip install 'ahk-linux-bridge[pixels]' for live capture") from e
+    except ImportError as exc:
+        raise RuntimeError(
+            "pip install 'ahk-linux-bridge[pixels]' for live capture") from exc
     with mss.mss() as s:
-        shot = s.grab(s.monitors[0])
-        return bytes(shot.rgb), shot.width, shot.height
+        if region is None:
+            shot = s.grab(s.monitors[0])
+        else:
+            x, y, width, height = region
+            shot = s.grab({"left": x, "top": y, "width": width, "height": height})
+    return bytes(shot.rgb), shot.width, shot.height
+
+
+def screenshot_rgb(region=None):
+    """Capture RGB pixels.  ``region`` is ``(x, y, w, h)`` or None (full screen).
+
+    Prefers KWin ScreenShot2 on Wayland (mss reads black there); falls back to
+    mss on X11 or when dbus-next/KWin are unavailable.
+    """
+    if region is not None:
+        x, y, width, height = (int(v) for v in region)
+        if width <= 0 or height <= 0:
+            raise ValueError("capture region must have positive size")
+        region = (max(0, x), max(0, y), width, height)
+    shot = _kwin_capture(region)
+    if shot is not None:
+        return shot
+    return _mss_capture(region)
