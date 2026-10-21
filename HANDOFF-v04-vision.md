@@ -273,23 +273,22 @@ github.com/wolfcoll111/AHK-Linux-Bridge, corpus at
 and live-verified).
 
 v0.4 phases 0–3 are complete. Verify first: `python3 -m pytest -q` must
-show 127 passed; live capture
+show 128 passed; live capture
 `python3 -c "from ahk_bridge import pixels as px;
 print(px.screenshot_rgb((0,0,32,32))[1:])"` must show (32, 32) and the
 pixels must not all be zero (KWin ScreenShot2; mss is black on this
 Wayland session); rerun the coverage recount (baseline: 524 funcs,
 22176 nodes, 380 raw/1.71%, 0 crashes).
 
-Next work is §7, not another vision phase: (a) stub-hit census for pure
-builtins, (b) the GUI decision. Do not reopen v0.4 vision unless a new
-load-bearing gap is measured.
+Next work is HANDOFF-v05-full-capability.md: the `#Include` loader, stub-hit
+census, pure builtins, timers/messages, GUI decision, OS bridge, and the
+end-to-end Natro proof. Do not reopen v0.4 vision unless a new load-bearing
+gap is measured.
 
 Rules: no hype, verify by execution (oracles, live logs) never by
-assertion; one phase per commit with regression tests in
-tests/test_vision.py; perf honesty over feature claims (report measured
-numbers, stop if loop rate is unreachable); add numpy to pyproject
-pixels-extra ONLY with before/after justification; commit+push every
-green step; update the HANDOFF numbers when they move. Finish only when
-§5.2 is proven live or a load-bearing gap from §4/§6 stops you — report
-that plainly.
+assertion; one feature per commit with a regression test that fails
+without it; perf honesty over feature claims (report measured numbers,
+stop if loop rate is unreachable); numpy is already in the pixels extra,
+and any new dependency needs before/after numbers; commit+push every
+green step; update the HANDOFF numbers when they move.
 ```
