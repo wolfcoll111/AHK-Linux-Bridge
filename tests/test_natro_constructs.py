@@ -102,6 +102,31 @@ def test_keywait_timeout_sleeps():
     assert ("sleep", 1000) in [(e[0], e[1]) for e in sim.log]
 
 
+def test_dateadd_datediff_ahk_units_and_calendar_months():
+    text = (
+        'a := DateDiff("20240102030405", "20240101000000", "S")\n'
+        'b := DateDiff("20240102030405", "20240101000000", "Hours")\n'
+        'c := DateDiff("20240102030405", "20240101000000", "Days")\n'
+        'd := DateDiff("20240102030405", "20240101000000", "m")\n'
+        'e := DateAdd("20240131235959", 1, "Months")\n'
+        'f := DateAdd("20240101", -1, "Days")\n'
+        'g := DateAdd("20240101", -10, "m")\n'
+        'h := DateDiff("20240228", "20240131", "Months")\n'
+        'i := DateDiff("20240101", "20250101", "Years")\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert rt.vars["a"] == 97445
+    assert rt.vars["b"] == 27
+    assert rt.vars["c"] == 1
+    assert rt.vars["d"] == 1624
+    assert rt.vars["e"] == "20240229235959"
+    assert rt.vars["f"] == "20231231000000"
+    assert rt.vars["g"] == "20231231235000"
+    assert rt.vars["h"] == 0
+    assert rt.vars["i"] == -1
+
+
 def test_iniread_builtin_matches_ahk_semantics(tmp_path):
     ini = tmp_path / "nm_config.ini"
     ini.write_text(

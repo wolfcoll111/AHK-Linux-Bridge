@@ -592,6 +592,8 @@ class Runtime:
                 default = ev(args[3]) if len(args) > 3 else ""
                 return self._read_ini_value(str(ev(args[0])), str(ev(args[1])),
                                             str(ev(args[2])), default)
+            if low in ("dateadd", "datediff") and len(args) >= 3:
+                return self._date_builtin(low, ev(args[0]), ev(args[1]), ev(args[2]))
             if low in ("fileexist", "winexist", "wingetcount", "processexist"):
                 return ""
             if low in ("isinteger", "isnumber") and args:
@@ -1370,6 +1372,87 @@ class Runtime:
                 self.logs.append(f"IniRead [{section}] {key} -> {v!r}")
         except OSError as e:
             self.logs.append(f"IniOp error: {e}")
+
+    @staticmethod
+    def _time_unit(unit) -> str | None:
+        """AHK TimeUnits: full names or first letter.  `M` is Minutes;
+        Months must be spelled out (or `Mo`)."""
+        u = str(unit).strip().lower()
+        if not u:
+            return None
+        if u.startswith("mo"):
+            return "months"
+        if u.startswith("m"):
+            return "minutes"
+        if u.startswith("s"):
+            return "seconds"
+        if u.startswith("h"):
+            return "hours"
+        if u.startswith("d"):
+            return "days"
+        if u.startswith("y"):
+            return "years"
+        return None
+
+    @staticmethod
+    def _parse_ahk_datetime(value):
+        """Parse YYYYMMDDHH24MISS (partial values default to Jan 1 / 00:00)."""
+        import datetime as _dt
+        digits = re.sub(r"\D", "", str(value))
+        if len(digits) < 4:
+            return None
+        digits = digits.ljust(14, "0")
+        try:
+            return _dt.datetime(
+                int(digits[0:4]), int(digits[4:6]) or 1, int(digits[6:8]) or 1,
+                int(digits[8:10]), int(digits[10:12]), int(digits[12:14]))
+        except (ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _add_months(dt, months: int):
+        import calendar
+        total = dt.year * 12 + (dt.month - 1) + months
+        year, month0 = divmod(total, 12)
+        month = month0 + 1
+        day = min(dt.day, calendar.monthrange(year, month)[1])
+        return dt.replace(year=year, month=month, day=day)
+
+    def _date_builtin(self, low: str, dt_arg, time_arg, unit_arg):
+        import datetime as _dt
+        unit = self._time_unit(unit_arg)
+        dt = self._parse_ahk_datetime(dt_arg)
+        if unit is None or dt is None:
+            return "" if low == "dateadd" else 0
+        if low == "dateadd":
+            try:
+                amount = int(float(time_arg))
+            except (TypeError, ValueError):
+                amount = 0
+            try:
+                if unit in ("months", "years"):
+                    out = self._add_months(dt, amount * (12 if unit == "years" else 1))
+                else:
+                    out = dt + _dt.timedelta(**{unit: amount})
+            except (ValueError, OverflowError):
+                return ""
+            return out.strftime("%Y%m%d%H%M%S")
+        other = self._parse_ahk_datetime(time_arg)
+        if other is None:
+            return 0
+        if dt >= other:
+            a, b, sign = dt, other, 1
+        else:
+            a, b, sign = other, dt, -1
+        if unit in ("months", "years"):
+            months = (a.year - b.year) * 12 + (a.month - b.month)
+            if self._add_months(b, months) > a:
+                months -= 1
+            return sign * (months // 12 if unit == "years" else months)
+        seconds = (a - b).total_seconds()
+        divisor = {"seconds": 1, "minutes": 60, "hours": 3600,
+                   "days": 86400}[unit]
+        return sign * int(seconds / divisor)
 
     @staticmethod
     def _read_ini_value(fname: str, section: str, key: str, default=""):
