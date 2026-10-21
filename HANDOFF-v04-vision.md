@@ -25,11 +25,17 @@ only if measured necessary — see §5 perf numbers).
 
 ## 2. Current state (measured 2026-10-16)
 
-- `python3 -m pytest -q` → **84 passed**.
+- `python3 -m pytest -q` → **109 passed** (84 v0.3 + 25 vision).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
   `__raw__` unknowns = 1.71%**. Remaining raws are help-text prose,
   Gdip machine-code data blobs, memory/DllCall stubs (by decision),
   2–3 join fragments. No systematic executable-code gap known.
+- `vision.py` phase 0+1 done (2026-10-21): handle table + base64/screen
+  producers, dispose loop flat over 1000 iterations, and image_search with
+  exact/Variation/Trans/direction/Instances/error-code oracles on synthetic
+  fixtures. Measured 500×500 region / 50×40 needle: **0.82 ms best, 0.94 ms
+  median** (Natro's tightest corpus cadence is `Sleep 50`; budget 5 ms =
+  an order of magnitude under it). Runtime wiring + live proof: not yet.
 - `pixels.py` today: `find_color[_in_region]` (pure Python, tested) +
   `screenshot_rgb()` via mss. Live-verified this session: **1920×1080
   screenshot in one call**. No portal/PipeWire capture (docstring promise

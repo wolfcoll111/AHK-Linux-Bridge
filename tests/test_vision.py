@@ -137,3 +137,198 @@ def test_dispose_1000_iteration_table_stays_flat():
         handle = vision.create_bitmap(4, 4)
         assert vision.dispose(handle) == 0
     assert vision._table_size() == baseline
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: search core, synthetic fixtures only.
+# ---------------------------------------------------------------------------
+
+def _pattern(w=8, h=6, seed=0):
+    image = Image.new("RGB", (w, h))
+    pixels = image.load()
+    for y in range(h):
+        for x in range(w):
+            pixels[x, y] = ((17 + seed + 7 * x + 11 * y) % 220 + 20,
+                            (31 + seed + 13 * x + 5 * y) % 200 + 25,
+                            (47 + seed + 3 * x + 17 * y) % 190 + 30)
+    return image
+
+
+def _paste(canvas, needle, x, y):
+    canvas.paste(needle, (x, y))
+    return canvas
+
+
+def _handles(canvas, needle):
+    return vision._register(canvas), vision._register(needle)
+
+
+def test_exact_find_count_and_output_list_bytes():
+    needle = _pattern()
+    canvas = _paste(Image.new("RGB", (120, 100), (1, 2, 3)), needle, 37, 24)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(hay, ndl)
+        assert count == 1
+        assert out == "37,24"
+        assert isinstance(out, str)
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_output_list_custom_delimiters_and_order():
+    needle = _pattern(seed=9)
+    canvas = Image.new("RGB", (140, 100), (1, 2, 3))
+    _paste(canvas, needle, 10, 12)
+    _paste(canvas, needle, 90, 60)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(
+            hay, ndl, instances=0, line_delim="|", coord_delim=";")
+        assert count == 2
+        assert out == "10;12|90;60"
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_not_present_returns_zero_and_empty_output():
+    needle = _pattern(seed=3)
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(hay, ndl)
+        assert (count, out) == (0, "")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_variation_boundary_inside():
+    needle = _pattern(10, 8, seed=5)
+    shifted = Image.eval(needle, lambda v: min(255, v + 12))
+    canvas = _paste(Image.new("RGB", (120, 90), (1, 2, 3)), shifted, 44, 33)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(hay, ndl, variation=12)
+        assert (count, out) == (1, "44,33")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_variation_boundary_outside():
+    needle = _pattern(10, 8, seed=5)
+    shifted = Image.eval(needle, lambda v: min(255, v + 12))
+    canvas = _paste(Image.new("RGB", (120, 90), (1, 2, 3)), shifted, 44, 33)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(hay, ndl, variation=11)
+        assert (count, out) == (0, "")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_trans_finds_where_plain_match_fails():
+    trans = (255, 0, 255)
+    needle = Image.new("RGB", (12, 12), trans)
+    pixels = needle.load()
+    for y in range(1, 11):
+        for x in range(1, 11):
+            pixels[x, y] = (10, 200, 30) if (x + y) % 2 else (30, 40, 220)
+    canvas = Image.new("RGB", (120, 100), (5, 5, 5))
+    # Paste only the opaque core: the transparent border stays background.
+    canvas.paste(needle.crop((1, 1, 11, 11)), (50, 40))
+    hay, ndl = _handles(canvas, needle)
+    try:
+        assert vision.image_search(hay, ndl) == (0, "")
+        count, out = vision.image_search(hay, ndl, trans=0xFF00FF)
+        # The opaque core starts at (50,40); the needle's transparent border
+        # means its top-left anchor is one pixel up/left.
+        assert (count, out) == (1, "49,39")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+@pytest.mark.parametrize("direction,expected", [
+    (1, (10, 15)),  # top -> left -> right -> bottom
+    (2, (60, 70)),  # bottom -> left -> right -> top
+    (3, (80, 70)),  # bottom -> right -> left -> top
+    (4, (60, 15)),  # top -> right -> left -> bottom
+    (5, (10, 15)),  # left -> top -> bottom -> right
+    (6, (10, 60)),  # left -> bottom -> top -> right
+    (7, (80, 70)),  # right -> bottom -> top -> left
+    (8, (80, 20)),  # right -> top -> bottom -> left
+])
+def test_search_direction_scan_order(direction, expected):
+    needle = _pattern(6, 6, seed=13)
+    canvas = Image.new("RGB", (100, 90), (1, 2, 3))
+    for x, y in ((10, 15), (60, 15), (10, 60), (60, 70), (80, 70), (80, 20)):
+        _paste(canvas, needle, x, y)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        count, out = vision.image_search(hay, ndl, direction=direction)
+        assert count == 1
+        assert out == f"{expected[0]},{expected[1]}"
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_instances_cap_and_find_all():
+    needle = _pattern(6, 6, seed=21)
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    for x, y in ((10, 10), (50, 30), (80, 60)):
+        _paste(canvas, needle, x, y)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        assert vision.image_search(hay, ndl, instances=2) == (2, "10,10\n50,30")
+        assert vision.image_search(hay, ndl, instances=0)[0] == 3
+        assert vision.image_search(hay, ndl, instances=-4)[0] == 3
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_error_codes_and_null_handles():
+    needle = _pattern(5, 5)
+    hay, ndl = _handles(Image.new("RGB", (50, 50), (1, 2, 3)), needle)
+    try:
+        assert vision.image_search(0, ndl) == (-1001, "")
+        assert vision.image_search(hay, "") == (-1001, "")
+        assert vision.image_search(hay, None) == (-1001, "")
+        assert vision.image_search(hay, ndl, variation=-1) == (-1002, "")
+        assert vision.image_search(hay, ndl, variation=256) == (-1002, "")
+        assert vision.image_search(hay, ndl, outer_x1=-1) == (-1003, "")
+        assert vision.image_search(hay, ndl, outer_y1=-2) == (-1003, "")
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
+
+
+def test_perf_500x500_50x40_needle_under_loop_budget():
+    # Natro's tightest farming cadence in the corpus is Sleep 50 (e.g.
+    # natro_macro.ahk:8576), so the loop budget is 50 ms.  The handoff
+    # requires an order of magnitude of headroom: assert < 5 ms per search.
+    import time
+    needle = _pattern(50, 40, seed=31)
+    canvas = _paste(Image.new("RGB", (500, 500), (1, 2, 3)), needle, 123, 234)
+    hay, ndl = _handles(canvas, needle)
+    try:
+        vision.image_search(hay, ndl)  # warm caches
+        samples = []
+        for _ in range(7):
+            start = time.perf_counter()
+            count, out = vision.image_search(hay, ndl)
+            samples.append((time.perf_counter() - start) * 1000)
+        assert (count, out) == (1, "123,234")
+        best = min(samples)
+        median = sorted(samples)[len(samples) // 2]
+        print(f"\nperf 500x500/50x40: best={best:.3f}ms median={median:.3f}ms")
+        assert best < 5.0, f"search too slow: best {best:.3f}ms"
+    finally:
+        vision.dispose(hay)
+        vision.dispose(ndl)
