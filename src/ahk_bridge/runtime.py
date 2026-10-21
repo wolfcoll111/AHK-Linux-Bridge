@@ -592,6 +592,10 @@ class Runtime:
                 default = ev(args[3]) if len(args) > 3 else ""
                 return self._read_ini_value(str(ev(args[0])), str(ev(args[1])),
                                             str(ev(args[2])), default)
+            if low == "string" and args:
+                return self._to_ahk_string(ev(args[0]))
+            if low == "number" and args:
+                return self._to_ahk_number(ev(args[0]))
             if low in ("dateadd", "datediff") and len(args) >= 3:
                 return self._date_builtin(low, ev(args[0]), ev(args[1]), ev(args[2]))
             if low in ("fileexist", "winexist", "wingetcount", "processexist"):
@@ -1372,6 +1376,43 @@ class Runtime:
                 self.logs.append(f"IniRead [{section}] {key} -> {v!r}")
         except OSError as e:
             self.logs.append(f"IniOp error: {e}")
+
+    @staticmethod
+    def _to_ahk_string(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, float):
+            # AHK integer-valued doubles print without a trailing .0.
+            return str(int(value)) if value.is_integer() else str(value)
+        return str(value)
+
+    @staticmethod
+    def _to_ahk_number(value):
+        """AHK Number(): numeric strings become int/float; non-numeric values
+        throw (callers validate with IsNumber first)."""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        if isinstance(value, bool):
+            return int(value)
+        s = str(value).strip()
+        if re.fullmatch(r"[+-]?\d+", s):
+            try:
+                return int(s)
+            except ValueError:
+                pass
+        if re.fullmatch(r"[+-]?0[xX][0-9a-fA-F]+", s):
+            try:
+                return int(s, 16)
+            except ValueError:
+                pass
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?", s):
+            try:
+                return float(s)
+            except ValueError:
+                pass
+        raise RuntimeError(f"Number: cannot convert {value!r} to a number")
 
     @staticmethod
     def _time_unit(unit) -> str | None:

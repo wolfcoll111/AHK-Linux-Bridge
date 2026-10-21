@@ -1,6 +1,9 @@
 """v0.3 Natro-driven constructs: switch, for, try, Loop Parse/Files, Map,
 subscripts, ternary, compound-assign, Seq, fat-arrow, KeyWait, Ini, Throw."""
 import os
+
+import pytest
+
 from ahk_bridge.parser import parse_script
 from ahk_bridge import runtime as R
 from ahk_bridge.backends.dry_backend import DryBackend
@@ -100,6 +103,29 @@ def test_keywait_timeout_sleeps():
     sc, rt, sim = run('KeyWait "LButton", "D T1"\n')
     rt.run_auto()
     assert ("sleep", 1000) in [(e[0], e[1]) for e in sim.log]
+
+
+def test_string_and_number_conversions():
+    text = (
+        "a := String(42)\n"
+        "b := String(1.5)\n"
+        "c := String(1.0)\n"
+        'd := Number("08")\n'
+        'e := Number("1.25")\n'
+        'f := Number(" 42 ")\n'
+        'g := Number("0x10")\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert rt.vars["a"] == "42"
+    assert rt.vars["b"] == "1.5"
+    assert rt.vars["c"] == "1"
+    assert rt.vars["d"] == 8
+    assert rt.vars["e"] == 1.25
+    assert rt.vars["f"] == 42
+    assert rt.vars["g"] == 16
+    with pytest.raises(RuntimeError):
+        rt._to_ahk_number("not a number")
 
 
 def test_dateadd_datediff_ahk_units_and_calendar_months():
