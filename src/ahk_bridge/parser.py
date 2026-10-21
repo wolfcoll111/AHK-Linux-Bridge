@@ -883,10 +883,10 @@ def parse_statement(line: str):
         return IncDec(m.group(2), 1 if m.group(1) == "++" else -1)
     m = LEGACY_CMD_RE.match(s)
     if m and not re.match(r'^\s*:?=', m.group(2)):
-        # AHK v2 call syntax wins over the legacy command: `Sleep(100)` must
-        # reach the runtime's sleep builtin, not become a no-op LegacyCmd.
-        if not (m.group(1).lower() == "sleep"
-                and m.group(2).lstrip().startswith("(")):
+        # AHK v2 call syntax wins over the legacy command: `Sleep(100)` and
+        # `SplitPath(path, &dir)` must reach the function/builtin path, not
+        # become a no-op LegacyCmd with parenthesized text.
+        if not m.group(2).lstrip().startswith("("):
             return LegacyCmd(m.group(1), m.group(2).strip())
     # short-circuit statement forms: A && B / A || B, incl. N-ary chains
     # (`IsSet(x) && ok && cleanup()` runs cleanup only if all hold).
@@ -950,10 +950,10 @@ def parse_statement(line: str):
         # NOTE: _split_seq (not _parse_args): keeps quotes so runtime eval
         # sees "str" vs identifier. All call args are evaluated at runtime.
         raw_args = [p.strip() for p in _split_seq(argstr)] if argstr.strip() else []
-        # Gdip_* signatures are positional and callers omit middle arguments
-        # (`Gdip_ImageSearch(hay, needle, &out, , , , , 5)`).  Keep the empty
-        # slots so 5 lands on Variation, not on OuterX1.
-        if not name.startswith("Gdip_"):
+        # Gdip_* and SplitPath signatures are positional: callers omit
+        # middle/named arguments (`SplitPath(sFile,,, &ext)`), so keep the
+        # empty slots instead of shifting outputs left.
+        if not name.startswith("Gdip_") and name.lower() != "splitpath":
             raw_args = [p for p in raw_args if p != ""]
         if rest.startswith("=>"):
             # fat-arrow definition: Name(params) => expr

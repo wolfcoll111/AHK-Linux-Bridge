@@ -105,6 +105,27 @@ def test_keywait_timeout_sleeps():
     assert ("sleep", 1000) in [(e[0], e[1]) for e in sim.log]
 
 
+def test_splitpath_call_and_command_byref_outputs():
+    text = (
+        'SplitPath("/home/user/My File.txt", &name, &dir, &ext, &noext, &drive)\n'
+        'SplitPath("C:\\My Dir\\File.txt", &wname, &wdir, &wext)\n'
+        'SplitPath("relative.txt", , &rdir)\n'
+        'SplitPath "C:\\My Dir\\Legacy.txt", , &legacyDir\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert rt.vars["name"] == "My File.txt"
+    assert rt.vars["dir"] == "/home/user/"
+    assert rt.vars["ext"] == "txt"
+    assert rt.vars["noext"] == "My File"
+    assert rt.vars["drive"] == "/"
+    assert rt.vars["wname"] == "File.txt"
+    assert rt.vars["wdir"] == "C:\\My Dir\\"
+    assert rt.vars["wext"] == "txt"
+    assert rt.vars["rdir"] == ""
+    assert rt.vars["legacyDir"] == "C:\\My Dir\\"
+
+
 def test_string_and_number_conversions():
     text = (
         "a := String(42)\n"

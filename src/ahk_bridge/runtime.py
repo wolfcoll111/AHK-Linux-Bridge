@@ -592,6 +592,8 @@ class Runtime:
                 default = ev(args[3]) if len(args) > 3 else ""
                 return self._read_ini_value(str(ev(args[0])), str(ev(args[1])),
                                             str(ev(args[2])), default)
+            if low == "splitpath" and args:
+                return self._split_path_builtin(args)
             if low == "string" and args:
                 return self._to_ahk_string(ev(args[0]))
             if low == "number" and args:
@@ -1131,7 +1133,84 @@ class Runtime:
                    "keyhistory", "exit"):
             self.logs.append(f"{st.name} {rest} (noted, linux no-op)")
             return
+        if low == "splitpath":
+            parts = [p.strip() for p in P._split_seq(rest)]
+            path = self._eval_assignment_arg(parts[0]) if parts else ""
+            values = self._split_path_parts(path)
+            for index, part in enumerate(parts[1:6]):
+                self._assign_output(part, values[index])
+            return
         self.logs.append(f"{st.name} {rest} (OS/window op, linux no-op)")
+
+    @staticmethod
+    def _split_path_parts(path):
+        """AHK SplitPath -> (Name, Dir, Ext, NameNoExt, Drive).
+
+        Accepts both `/` and `\\` separators regardless of host OS.  Dir keeps
+        its trailing separator and includes the drive root.
+        """
+        p = str(path)
+        drive, body = "", p
+        m = re.match(r'^([A-Za-z]:)(.*)$', p)
+        if m:
+            drive, body = m.group(1), m.group(2)
+        elif p.startswith("\\\\"):
+            bits = p.split("\\")
+            if len(bits) >= 4 and bits[2]:
+                drive = "\\\\" + bits[2] + "\\" + bits[3]
+                body = p[len(drive):]
+        elif p.startswith("/"):
+            drive, body = "/", p[1:]
+        cut = max(body.rfind("/"), body.rfind("\\"))
+        if cut >= 0:
+            dir_out = body[:cut + 1]
+            if drive and not dir_out.startswith(drive):
+                dir_out = drive + dir_out
+            name = body[cut + 1:]
+        else:
+            dir_out = drive if drive == "/" else ""
+            name = body
+        dot = name.rfind(".")
+        if dot > 0:
+            ext, name_no_ext = name[dot + 1:], name[:dot]
+        else:
+            ext, name_no_ext = "", name
+        return name, dir_out, ext, name_no_ext, drive
+
+    def _eval_assignment_arg(self, raw: str):
+        """Evaluate an argument that may itself be `var := expr`."""
+        text = str(raw).strip()
+        m = re.match(r'^([A-Za-z_]\w*)\s*:=\s*(.+)$', text)
+        if m:
+            value = self._eval_expr(m.group(2))
+            self.vars[m.group(1)] = value
+            return value
+        return self._eval_expr(text)
+
+    def _assign_output(self, raw: str, value):
+        """Assign a by-ref output (`&name`, `&name:=""`) or a legacy var."""
+        text = str(raw).strip()
+        if not text:
+            return
+        if text.startswith("&"):
+            text = text[1:].strip()
+        m = re.match(r'^([A-Za-z_]\w*)\s*:=\s*(.+)$', text)
+        if m:
+            target = m.group(1)
+            if target not in self.vars:
+                self.vars[target] = self._eval_expr(m.group(2))
+        else:
+            target = text
+        if re.fullmatch(r'[A-Za-z_]\w*', target):
+            self.vars[target] = value
+
+    def _split_path_builtin(self, args):
+        path = self._eval_assignment_arg(args[0]) if args and args[0].strip() else ""
+        values = self._split_path_parts(path)
+        for index, part in enumerate(values, 1):
+            if index < len(args):
+                self._assign_output(args[index], part)
+        return ""
 
     def _num(self, v) -> int:
         try:
