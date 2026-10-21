@@ -142,6 +142,48 @@ def test_onexit_runs_on_normal_script_end():
     assert types(sim) == ["done"]
 
 
+def test_onerror_arrow_suppresses_and_script_continues():
+    text = (
+        'OnError((e, mode) => (mode = "Return") ? 1 : 0)\n'
+        'Throw "boom"\n'
+        'Send "after"\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert types(sim) == ["after"]
+    assert any("OnError handled: boom" in line for line in rt.logs)
+
+
+def test_onerror_named_callback_sees_error_object():
+    text = (
+        "OnError(Handler)\n"
+        "Handler(e, mode) {\n"
+        "    handledMode := mode\n"
+        "    handledMsg := e.Message\n"
+        "    return 1\n"
+        "}\n"
+        'Throw "kaboom"\n'
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert rt.vars["handledMode"] == "Return"
+    assert rt.vars["handledMsg"] == "kaboom"
+
+
+def test_onerror_unhandled_still_raises_and_can_be_removed():
+    text = (
+        "OnError(Handler)\n"
+        "OnError(Handler, 0)\n"
+        "Handler(e, mode) {\n"
+        "    return 1\n"
+        "}\n"
+        'Throw "boom"\n'
+    )
+    sc, rt, sim = run(text)
+    with pytest.raises(RuntimeError, match="boom"):
+        rt.run_auto()
+
+
 def test_splitpath_call_and_command_byref_outputs():
     text = (
         'SplitPath("/home/user/My File.txt", &name, &dir, &ext, &noext, &drive)\n'

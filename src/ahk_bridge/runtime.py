@@ -104,6 +104,7 @@ class Runtime:
         self._stub_warned: set = set()  # builtin stubs logged once each
         self._exit_callbacks: list[tuple] = []
         self._exit_done = False
+        self._error_callbacks: list[tuple] = []
 
     # -- exit callbacks --
     @staticmethod
@@ -123,6 +124,51 @@ class Runtime:
             return ("func", text, [])
         return None
 
+    def _invoke_callback(self, spec: tuple, values: list):
+        """Invoke a callback spec with already-evaluated argument values.
+
+        Named callbacks receive arguments through temporary variables because
+        ``FuncCall`` arguments are raw source expressions; arrows bind their
+        parameter names directly for the duration of the call.
+        """
+        if spec[0] == "func":
+            saved: dict[str, object] = {}
+            args: list[str] = []
+            for index, value in enumerate(values):
+                name = f"__ahk_cb_{index}__"
+                saved[name] = self.vars.get(name, None)
+                has = name in self.vars
+                self.vars[name] = value
+                args.append(name)
+                if not has:
+                    # distinguish "was absent" from an existing None value
+                    saved.setdefault(f"__ahk_had_{index}__", False)
+                else:
+                    saved[f"__ahk_had_{index}__"] = True
+            try:
+                return self._call_value(P.FuncCall(spec[1], args))
+            finally:
+                for index in range(len(values)):
+                    name = f"__ahk_cb_{index}__"
+                    had = saved.get(f"__ahk_had_{index}__", False)
+                    if had:
+                        self.vars[name] = saved[name]
+                    else:
+                        self.vars.pop(name, None)
+        kind, body, names = spec
+        saved_vars = {n: self.vars.get(n) for n in names}
+        present = {n: n in self.vars for n in names}
+        for index, name in enumerate(names):
+            self.vars[name] = values[index] if index < len(values) else ""
+        try:
+            return self._eval_expr(body)
+        finally:
+            for name in names:
+                if present[name]:
+                    self.vars[name] = saved_vars[name]
+                else:
+                    self.vars.pop(name, None)
+
     def _run_exit_callbacks(self, reason: str = "Exit", code=0) -> bool:
         """Run OnExit callbacks; return True if one prevented the exit."""
         if self._exit_done:
@@ -130,28 +176,10 @@ class Runtime:
         prevented = False
         for spec in list(self._exit_callbacks):
             try:
-                if spec[0] == "func":
-                    result = self._call_value(P.FuncCall(spec[1], [
-                        f'"{reason}"', str(code)]))
-                else:
-                    kind, body, names = spec
-                    saved = {n: self.vars.get(n) for n in names}
-                    for index, name in enumerate(names):
-                        self.vars[name] = reason if index == 0 else code
-                    try:
-                        result = self._eval_expr(body)
-                    finally:
-                        for name in names:
-                            if saved[name] is None:
-                                self.vars.pop(name, None)
-                            else:
-                                self.vars[name] = saved[name]
-                try:
-                    if str(result).strip() not in ("", "0"):
-                        prevented = True
-                        break
-                except Exception:
-                    pass
+                result = self._invoke_callback(spec, [reason, code])
+                if self._truthy(result):
+                    prevented = True
+                    break
             except Exception as exc:  # noqa: BLE001 - cleanup must not crash
                 self.logs.append(f"OnExit callback failed: {exc}")
         if prevented:
@@ -159,6 +187,47 @@ class Runtime:
         else:
             self._exit_done = True
         return prevented
+
+    def _dispatch_error(self, exc: Exception) -> bool:
+        """Offer an uncaught script error to OnError callbacks.
+
+        Returns True when a callback suppressed the error (non-zero result),
+        matching AHK: the erroring thread stops but the remaining top-level
+        statements continue.
+        """
+        if not self._error_callbacks:
+            return False
+        message = str(exc) or exc.__class__.__name__
+        error_obj = {
+            "Message": message,
+            "What": "",
+            "Extra": "",
+            "File": self.vars.get("A_LineFile", ""),
+            "Line": 0,
+            "Stack": "",
+        }
+        for spec in list(self._error_callbacks):
+            try:
+                result = self._invoke_callback(spec, [error_obj, "Return"])
+            except Exception as handler_exc:  # noqa: BLE001 - handler must not crash
+                self.logs.append(f"OnError callback failed: {handler_exc}")
+                continue
+            if self._truthy(result):
+                self.logs.append(f"OnError handled: {message}")
+                return True
+        return False
+
+    def _exec_reporting(self, stmts):
+        """Execute statements, giving OnError a chance at uncaught errors."""
+        for st in stmts:
+            self._check()
+            try:
+                self._exec(st)
+            except Aborted:
+                raise
+            except Exception as exc:  # noqa: BLE001 - OnError decides
+                if not self._dispatch_error(exc):
+                    raise
 
     # -- abort --
     def abort(self):
@@ -175,7 +244,7 @@ class Runtime:
     # -- entry points --
     def run_auto(self):
         try:
-            self._exec_block(self.script.auto_section)
+            self._exec_reporting(self.script.auto_section)
         except Aborted:
             raise
         else:
@@ -184,7 +253,7 @@ class Runtime:
     def fire_hotkey(self, key: str):
         for hk in self.script.hotkeys:
             if hk.key.lower() == key.lower():
-                self._exec_block(hk.body)
+                self._exec_reporting(hk.body)
                 return True
         return False
 
@@ -470,6 +539,26 @@ class Runtime:
             else:
                 self._exit_callbacks.append(spec)
             self.logs.append(f"OnExit registered {spec[1]!r} (AddRemove={addremove})")
+            return 1
+        if low == "onerror":
+            spec = self._callback_spec(c.args[0]) if c.args else None
+            addremove = 1
+            if len(c.args) > 1:
+                try:
+                    addremove = int(self._eval_expr(c.args[1]))
+                except (TypeError, ValueError):
+                    addremove = 1
+            if spec is None:
+                self.logs.append("OnError: unsupported callback expression (logged)")
+                return 0
+            if addremove == 0:
+                self._error_callbacks = [
+                    s for s in self._error_callbacks if s != spec]
+            elif addremove == -1:
+                self._error_callbacks.insert(0, spec)
+            else:
+                self._error_callbacks.append(spec)
+            self.logs.append(f"OnError registered {spec[1]!r} (AddRemove={addremove})")
             return 1
         if low == "sleep" and c.args:
             self.sim.sleep_ms(self._resolve_sleep(c.args[0]))
