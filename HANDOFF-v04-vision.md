@@ -25,7 +25,7 @@ only if measured necessary — see §5 perf numbers).
 
 ## 2. Current state (measured 2026-10-16)
 
-- `python3 -m pytest -q` → **109 passed** (84 v0.3 + 25 vision).
+- `python3 -m pytest -q` → **114 passed** (84 v0.3 + 30 vision).
 - Natro corpus: **150 files, 0 crashes, 524 functions, 22176 nodes, 380
   `__raw__` unknowns = 1.71%**. Remaining raws are help-text prose,
   Gdip machine-code data blobs, memory/DllCall stubs (by decision),
@@ -35,7 +35,11 @@ only if measured necessary — see §5 perf numbers).
   exact/Variation/Trans/direction/Instances/error-code oracles on synthetic
   fixtures. Measured 500×500 region / 50×40 needle: **0.82 ms best, 0.94 ms
   median** (Natro's tightest corpus cadence is `Sleep 50`; budget 5 ms =
-  an order of magnitude under it). Runtime wiring + live proof: not yet.
+  an order of magnitude under it). Runtime wiring done (2026-10-21):
+  Gdip_* calls execute through the parser/runtime, `&OutputList` and
+  `&w/&h` write `vars`, positional omitted args stay in their slots,
+  dispose returns the table to baseline, unknown Gdip_* log one stub each.
+  Live proof (§5.2): not yet.
 - `pixels.py` today: `find_color[_in_region]` (pure Python, tested) +
   `screenshot_rgb()` via mss. Live-verified this session: **1920×1080
   screenshot in one call**. No portal/PipeWire capture (docstring promise

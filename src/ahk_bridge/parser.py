@@ -885,7 +885,11 @@ def parse_statement(line: str):
         # NOTE: _split_seq (not _parse_args): keeps quotes so runtime eval
         # sees "str" vs identifier. All call args are evaluated at runtime.
         raw_args = [p.strip() for p in _split_seq(argstr)] if argstr.strip() else []
-        raw_args = [p for p in raw_args if p != ""]
+        # Gdip_* signatures are positional and callers omit middle arguments
+        # (`Gdip_ImageSearch(hay, needle, &out, , , , , 5)`).  Keep the empty
+        # slots so 5 lands on Variation, not on OuterX1.
+        if not name.startswith("Gdip_"):
+            raw_args = [p for p in raw_args if p != ""]
         if rest.startswith("=>"):
             # fat-arrow definition: Name(params) => expr
             _params = []

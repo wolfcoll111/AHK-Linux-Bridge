@@ -386,6 +386,8 @@ class Runtime:
 
     def _builtin(self, c: P.FuncCall):
         low = c.name.lower()
+        if low.startswith("gdip_"):
+            return self._gdip_builtin(c.name, c.args)
         if low == "sleep" and c.args:
             self.sim.sleep_ms(self._resolve_sleep(c.args[0]))
             return ""
@@ -399,6 +401,81 @@ class Runtime:
             self._win_activate(str(c.args[0]))
             return ""
         return self._pure_builtin(low, c.args)
+
+    def _gdip_builtin(self, name: str, args: list):
+        """Execute the Gdip_* surface Natro's eyes actually use.
+
+        Unknown Gdip_* names stay logged stubs (one line each).  Argument
+        positions are preserved by the parser for this namespace because the
+        AHK signatures use positional omitted parameters.
+        """
+        from . import vision
+        low = name.lower()
+
+        def raw(i):
+            return args[i].strip() if i < len(args) else ""
+
+        def val(i, default=""):
+            a = raw(i)
+            return default if a == "" else self._eval_expr(a)
+
+        def byref(i):
+            a = raw(i)
+            if a.startswith("&"):
+                target = a[1:].strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", target):
+                    return target
+            return None
+
+        if low == "gdip_bitmapfrombase64":
+            try:
+                return vision.from_base64(val(0))
+            except (TypeError, ValueError) as exc:
+                self.logs.append(f"Gdip_BitmapFromBase64 failed: {exc}")
+                return 0
+        if low == "gdip_bitmapfromscreen":
+            try:
+                return vision.from_screen(val(0, None))
+            except Exception as exc:
+                self.logs.append(f"Gdip_BitmapFromScreen failed: {exc}")
+                return 0
+        if low == "gdip_createbitmap":
+            try:
+                return vision.create_bitmap(val(0, 0), val(1, 0))
+            except (TypeError, ValueError) as exc:
+                self.logs.append(f"Gdip_CreateBitmap failed: {exc}")
+                return 0
+        if low == "gdip_disposeimage":
+            return vision.dispose(val(0, 0))
+        if low == "gdip_getimagewidth":
+            return vision.width(val(0, 0))
+        if low == "gdip_getimageheight":
+            return vision.height(val(0, 0))
+        if low == "gdip_getimagedimensions":
+            dims = vision.dimensions(val(0, 0)) or (0, 0)
+            for index, value in ((1, dims[0]), (2, dims[1])):
+                target = byref(index)
+                if target:
+                    self.vars[target] = value
+            return 0
+        if low == "gdip_imagesearch":
+            count, text = vision.image_search(
+                val(0, 0), val(1, 0),
+                outer_x1=val(3, 0), outer_y1=val(4, 0),
+                outer_x2=val(5, 0), outer_y2=val(6, 0),
+                variation=val(7, 0), trans=val(8, None),
+                direction=val(9, 1), instances=val(10, 1),
+                line_delim=val(11, "\n"), coord_delim=val(12, ","),
+            )
+            target = byref(2)
+            if target and count >= 0:
+                self.vars[target] = text
+            return count
+
+        if low not in self._stub_warned:
+            self._stub_warned.add(low)
+            self.logs.append(f"stub {name}() -> falsy (Gdip surface not ported)")
+        return ""
 
     def _pure_builtin(self, low: str, args: list):
         """Side-effect-free builtins usable inside expressions. Unknown GUI/OS
@@ -1325,7 +1402,10 @@ class Runtime:
         if m and self._balanced(s):
             from .parser import _split_seq as _ss
             _args = [p.strip() for p in _ss(m.group(2))] if m.group(2).strip() else []
-            return self._call_value(P.FuncCall(m.group(1), [p for p in _args if p != ""]))
+            # Gdip_* calls use positional omitted arguments; preserve empties.
+            if not m.group(1).startswith("Gdip_"):
+                _args = [p for p in _args if p != ""]
+            return self._call_value(P.FuncCall(m.group(1), _args))
         m = re.match(r"^(.+?)\.([A-Za-z_]\w*)\s*\((.*)\)$", s, re.DOTALL)
         if m and self._balanced(s):
             obj, meth, argstr = self._eval_expr(m.group(1)), m.group(2).lower(), m.group(3)

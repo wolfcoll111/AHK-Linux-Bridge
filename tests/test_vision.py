@@ -332,3 +332,114 @@ def test_perf_500x500_50x40_needle_under_loop_budget():
     finally:
         vision.dispose(hay)
         vision.dispose(ndl)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: runtime wiring (execution through parser + Runtime).
+# ---------------------------------------------------------------------------
+
+def _png_b64(image):
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _run_script(text, monkeypatch, screen):
+    from ahk_bridge.parser import parse_script
+    from ahk_bridge.runtime import Runtime
+    from ahk_bridge.backends.dry_backend import DryBackend
+
+    monkeypatch.setattr(vision, "from_screen",
+                        lambda region=None: vision._register(screen))
+    script = parse_script(text)
+    rt = Runtime(script, DryBackend())
+    rt.run_auto()
+    return rt
+
+
+def test_runtime_image_search_writes_byref_and_disposes(monkeypatch):
+    needle = _pattern(9, 7, seed=41)
+    canvas = _paste(Image.new("RGB", (100, 80), (1, 2, 3)), needle, 31, 22)
+    b64 = _png_b64(needle)
+    baseline = vision._table_size()
+    text = (
+        'hay := Gdip_BitmapFromScreen("0|0|100|80")\n'
+        f'needle := Gdip_BitmapFromBase64("{b64}")\n'
+        'n := Gdip_ImageSearch(hay, needle, &list)\n'
+        'MsgBox {n}\n'
+        'MsgBox {list}\n'
+        'Gdip_DisposeImage(hay)\n'
+        'Gdip_DisposeImage(needle)\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert rt.vars["n"] == 1
+    assert rt.vars["list"] == "31,22"
+    assert "MsgBox: 1" in rt.logs
+    assert "MsgBox: 31,22" in rt.logs
+    assert vision._table_size() == baseline
+
+
+def test_runtime_omitted_args_keep_positional_meaning(monkeypatch):
+    # Variation is argument 7.  If empty slots were dropped, 12 would land on
+    # OuterX1 and this shaded needle would not match (variation would be 0).
+    needle = _pattern(10, 8, seed=43)
+    shifted = Image.eval(needle, lambda v: min(255, v + 12))
+    canvas = _paste(Image.new("RGB", (120, 90), (1, 2, 3)), shifted, 44, 33)
+    b64 = _png_b64(needle)
+    text = (
+        'hay := Gdip_BitmapFromScreen("0|0|120|90")\n'
+        f'needle := Gdip_BitmapFromBase64("{b64}")\n'
+        'n := Gdip_ImageSearch(hay, needle, &list, , , , , 12)\n'
+        'MsgBox {n}\n'
+        'MsgBox {list}\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert (rt.vars["n"], rt.vars["list"]) == (1, "44,33")
+
+
+def test_runtime_direction_and_delimiters_land_in_right_slots(monkeypatch):
+    needle = _pattern(6, 6, seed=47)
+    canvas = Image.new("RGB", (100, 90), (1, 2, 3))
+    for x, y in ((10, 15), (80, 70)):
+        _paste(canvas, needle, x, y)
+    b64 = _png_b64(needle)
+    text = (
+        'hay := Gdip_BitmapFromScreen("0|0|100|90")\n'
+        f'needle := Gdip_BitmapFromBase64("{b64}")\n'
+        'n := Gdip_ImageSearch(hay, needle, &list, , , , , 0, , 3, 0, "|", "~")\n'
+        'MsgBox {n}\n'
+        'MsgBox {list}\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert rt.vars["n"] == 2
+    # direction 3 (bottom->right->left->top) sees the lower needle first
+    assert rt.vars["list"] == "80~70|10~15"
+
+
+def test_runtime_dimensions_and_byref_outputs(monkeypatch):
+    canvas = Image.new("RGB", (100, 80), (1, 2, 3))
+    text = (
+        'hay := Gdip_BitmapFromScreen("0|0|100|80")\n'
+        'w := Gdip_GetImageWidth(hay)\n'
+        'h := Gdip_GetImageHeight(hay)\n'
+        'Gdip_GetImageDimensions(hay, &dw, &dh)\n'
+        'MsgBox {w}\n'
+        'MsgBox {h}\n'
+        'MsgBox {dw}\n'
+        'MsgBox {dh}\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    assert (rt.vars["w"], rt.vars["h"], rt.vars["dw"], rt.vars["dh"]) == (100, 80, 100, 80)
+    assert rt.logs[-4:] == ["MsgBox: 100", "MsgBox: 80", "MsgBox: 100", "MsgBox: 80"]
+
+
+def test_runtime_unknown_gdip_stub_logs_once(monkeypatch):
+    canvas = Image.new("RGB", (20, 20), (1, 2, 3))
+    text = (
+        'hay := Gdip_BitmapFromScreen("0|0|20|20")\n'
+        'Gdip_FillRectangle(hay, 1, 2, 3, 4)\n'
+        'Gdip_FillRectangle(hay, 1, 2, 3, 4)\n'
+    )
+    rt = _run_script(text, monkeypatch, canvas)
+    hits = [line for line in rt.logs if "stub Gdip_FillRectangle()" in line]
+    assert len(hits) == 1
