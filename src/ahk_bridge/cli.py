@@ -27,8 +27,20 @@ def cmd_run(args) -> int:
     except (PermissionError, RuntimeError) as e:
         print(f"backend error: {e}", file=sys.stderr)
         return 2
+    script_args = list(getattr(args, "script_args", []) or [])
+    if script_args[:1] == ["--"]:
+        script_args = script_args[1:]
+    screen_size = None
+    try:
+        from . import pixels
+        _, _, width, height = pixels.screen_size()
+        if width > 0 and height > 0:
+            screen_size = (width, height)
+    except Exception:
+        pass
     rt = Runtime(script, sim, max_loop=args.max_loop, jitter=args.jitter,
-                 seed=args.seed)
+                 seed=args.seed, script_path=args.script,
+                 args=script_args, screen_size=screen_size)
     try:
         repeats = max(1, args.repeat)
         for rep in range(repeats):
@@ -249,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run an .ahk script (auto-section or one hotkey)")
     r.add_argument("script")
+    r.add_argument("script_args", nargs=argparse.REMAINDER,
+                   help="arguments exposed to the script as A_Args "
+                        "(use -- before them)")
     r.add_argument("--backend", choices=["x11", "uinput", "dry"], default=None)
     r.add_argument("--no-includes", action="store_true",
                    help="parse the file without expanding #Include directives")

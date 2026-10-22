@@ -5,9 +5,13 @@ Loop/Sleep var resolution, {Key} send-sequences, live PixelSearch + WinActivate.
 """
 from __future__ import annotations
 import ast
+import datetime as _dt
+import os
 import random
 import re
+import sys
 import threading
+import time
 from . import parser as P
 
 ABORT_KEYS = ("Escape", "Ctrl+Alt+C")
@@ -33,6 +37,69 @@ class _Return(Exception):
     def __init__(self, value=None):
         super().__init__("return")
         self.value = value
+
+
+class TrayMenu:
+    """Minimal ``A_TrayMenu`` object.
+
+    There is no system tray on a headless Linux run, but Natro's startup code
+    creates the menu and later may click an item programmatically.  Keeping
+    the item list and callbacks real makes those paths work without a GUI;
+    ``show()`` writes the menu to the runtime log for display-only runs.
+    """
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.items: list[tuple[str | None, str | None]] = []
+        self.checks: set[str] = set()
+        self.default: str | None = None
+
+    def dispatch(self, method: str, raw_args: list[str], runtime):
+        method = method.lower()
+        if method == "add":
+            label = ""
+            if raw_args:
+                label = runtime._to_ahk_string(runtime._eval_expr(raw_args[0]))
+            callback = raw_args[1].strip() if len(raw_args) > 1 else None
+            self.items.append((label or None, callback))
+            return 1
+        if method == "addstandard":
+            return 1
+        if method == "delete":
+            self.items.clear()
+            self.checks.clear()
+            self.default = None
+            return 1
+        if method == "show":
+            labels = ", ".join(name for name, _ in self.items if name)
+            runtime.logs.append(f"A_TrayMenu.Show: {labels}")
+            return 1
+        if method in ("togglecheck", "check", "uncheck"):
+            label = runtime._to_ahk_string(
+                runtime._eval_expr(raw_args[0])) if raw_args else ""
+            if method == "togglecheck":
+                if label in self.checks:
+                    self.checks.discard(label)
+                else:
+                    self.checks.add(label)
+            elif method == "check":
+                self.checks.add(label)
+            else:
+                self.checks.discard(label)
+            return 1 if label in self.checks else 0
+        if method in ("click", "invoke"):
+            label = runtime._to_ahk_string(
+                runtime._eval_expr(raw_args[0])) if raw_args else ""
+            for index, (name, callback) in enumerate(self.items):
+                if name == label:
+                    spec = runtime._callback_spec(callback or "")
+                    if spec:
+                        runtime._invoke_callback(
+                            spec, [label, index + 1, self])
+                    return 1
+            return 0
+        runtime.logs.append(f"A_TrayMenu.{method}() unsupported (logged)")
+        return ""
 
 
 def _has_cmp_op(s: str) -> bool:
@@ -91,7 +158,9 @@ _SEND_TOKEN_RE = re.compile(r"\{([^{}]+)\}")
 
 class Runtime:
     def __init__(self, script: P.Script, sim, abort_keys=ABORT_KEYS,
-                 max_loop=10_000, jitter: float = 0.0, seed=None):
+                 max_loop=10_000, jitter: float = 0.0, seed=None,
+                 script_path: str | None = None, args=(),
+                 working_dir: str | None = None, screen_size=None):
         self.script = script
         self.sim = sim
         self.vars: dict = {}
@@ -105,6 +174,98 @@ class Runtime:
         self._exit_callbacks: list[tuple] = []
         self._exit_done = False
         self._error_callbacks: list[tuple] = []
+        self._init_builtin_vars(script_path, args, working_dir, screen_size)
+
+    # -- built-in variables --
+    def _init_builtin_vars(self, script_path, args, working_dir, screen_size):
+        self._start_tick = time.monotonic()
+        if script_path:
+            full = os.path.abspath(os.path.expanduser(os.fspath(script_path)))
+            script_dir = os.path.dirname(full)
+            script_name = os.path.basename(full)
+        else:
+            full = ""
+            script_dir = os.getcwd()
+            script_name = ""
+        work = os.path.abspath(os.path.expanduser(
+            os.fspath(working_dir))) if working_dir else script_dir
+        home = os.path.expanduser("~")
+        temp = os.environ.get("TMPDIR") or "/tmp"
+        if screen_size is None:
+            try:
+                screen_size = (int(os.environ["AHK_SCREEN_WIDTH"]),
+                               int(os.environ["AHK_SCREEN_HEIGHT"]))
+            except (KeyError, ValueError):
+                screen_size = (1920, 1080)
+        try:
+            from . import __version__ as _version
+        except Exception:  # pragma: no cover - version import is optional
+            _version = "0.1.0"
+        self.vars.update({
+            "A_ScriptDir": script_dir,
+            "A_ScriptName": script_name,
+            "A_ScriptFullPath": full,
+            "A_WorkingDir": work,
+            "A_LineFile": full,
+            "A_LineNumber": 0,
+            "A_Temp": temp,
+            "A_AppData": os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config")),
+            "A_AppDataCommon": "/etc",
+            "A_Desktop": os.path.join(home, "Desktop"),
+            "A_MyDocuments": os.path.join(home, "Documents"),
+            "A_UserProfile": home,
+            "A_Home": home,
+            "A_AhkPath": os.environ.get("AHK_BRIDGE_EXE") or sys.executable,
+            "A_AhkVersion": _version,
+            "A_PtrSize": 8 if sys.maxsize > 2**32 else 4,
+            "A_Is64bitOS": 1 if sys.maxsize > 2**32 else 0,
+            "A_IsAdmin": 1 if hasattr(os, "geteuid") and os.geteuid() == 0 else 0,
+            "A_IsCompiled": 0,
+            "A_LastError": 0,
+            "A_KeyDelay": 10,
+            "A_Clipboard": "",
+            "A_Space": " ",
+            "A_Tab": "\t",
+            "A_ScreenWidth": int(screen_size[0]),
+            "A_ScreenHeight": int(screen_size[1]),
+            "A_ScreenDPI": 96,
+            "A_IsPaused": 0,
+            "A_ScriptHwnd": 0,
+            "A_Args": [str(a) for a in (args or [])],
+        })
+        self.vars["A_TrayMenu"] = TrayMenu(self)
+        self._refresh_builtin_vars()
+
+    def _refresh_builtin_vars(self):
+        """Update clock-derived variables; AHK refreshes these on each use."""
+        now = _dt.datetime.now()
+        utc = _dt.datetime.now(_dt.timezone.utc)
+        self.vars.update({
+            "A_Now": now.strftime("%Y%m%d%H%M%S"),
+            "A_NowUTC": utc.strftime("%Y%m%d%H%M%S"),
+            "A_Year": now.strftime("%Y"),
+            "A_YYYY": now.strftime("%Y"),
+            "A_MM": now.strftime("%m"),
+            "A_DD": now.strftime("%d"),
+            "A_Hour": now.strftime("%H"),
+            "A_Min": now.strftime("%M"),
+            "A_Sec": now.strftime("%S"),
+            "A_MSec": f"{now.microsecond // 1000:03d}",
+            "A_YDay": str(now.timetuple().tm_yday),
+            "A_WDay": str((now.weekday() + 1) % 7 + 1),
+            "A_TickCount": int((time.monotonic() - self._start_tick) * 1000),
+        })
+
+    def _abs_path(self, path) -> str:
+        """Resolve a script path against ``A_WorkingDir`` (AHK semantics)."""
+        text = str(path).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+            text = text[1:-1]
+        text = os.path.expanduser(text.replace("\\", os.sep))
+        if os.path.isabs(text):
+            return os.path.normpath(text)
+        base = str(self.vars.get("A_WorkingDir") or os.getcwd())
+        return os.path.normpath(os.path.join(base, text))
 
     # -- exit callbacks --
     @staticmethod
@@ -272,6 +433,7 @@ class Runtime:
             self._exec(st)
 
     def _exec(self, st):
+        self._refresh_builtin_vars()
         if isinstance(st, P.Send):
             self._send_eval(st.text)
         elif isinstance(st, P.Click):
@@ -388,7 +550,24 @@ class Runtime:
         elif isinstance(st, P.ScopeDecl):
             pass  # our vars are function-global already; static persists too
         elif isinstance(st, P.Setting):
-            if st.name.lower() != "label":
+            name = st.name.lower()
+            if name == "setworkingdir":
+                raw = (st.args or "").strip()
+                target = str(self._eval_expr(raw)) if raw else ""
+                if not target:
+                    target = str(self.vars.get("A_ScriptDir") or os.getcwd())
+                path = os.path.expanduser(target.replace("\\", os.sep))
+                try:
+                    os.chdir(path)
+                    self.vars["A_WorkingDir"] = os.getcwd()
+                    self.logs.append(f"SetWorkingDir -> {os.getcwd()}")
+                except OSError as exc:
+                    self.logs.append(f"SetWorkingDir failed: {exc}")
+            elif name == "setkeydelay":
+                m = re.search(r"-?\d+", st.args or "")
+                if m:
+                    self.vars["A_KeyDelay"] = int(m.group(0))
+            elif st.name.lower() != "label":
                 self.logs.append(f"setting {st.name} {st.args} (noted, linux no-op)")
         elif isinstance(st, P.Include):
             self.logs.append(f"#Include {st.path} (not inlined; parse+run continues)")
@@ -481,6 +660,18 @@ class Runtime:
     def _call(self, c: P.FuncCall):
         self._call_value(c)
 
+    def _invoke_method(self, name: str, raw_args: list):
+        """Dispatch a dotted method call on a runtime object we model.
+
+        Returns ``(handled, value)`` so ordinary dotted function names still
+        fall through to the function/static tables.
+        """
+        base_expr, method = name.rsplit(".", 1)
+        obj = self._eval_expr(base_expr)
+        if isinstance(obj, TrayMenu):
+            return True, obj.dispatch(method, raw_args, self)
+        return False, None
+
     def _call_value(self, c: P.FuncCall):
         """Execute call, returning the function's Return value (or builtin)."""
         name = c.name
@@ -496,6 +687,10 @@ class Runtime:
         if c.name == "__raw__":
             self.logs.append(f"raw: {c.args[0] if c.args else ''}")
             return ""
+        if "." in c.name:
+            handled, result = self._invoke_method(c.name, c.args)
+            if handled:
+                return result
         fn = self.script.functions.get(c.name)
         if fn is None:
             return self._builtin(c)
@@ -899,8 +1094,9 @@ class Runtime:
                 return ""
             if low == "iniread" and len(args) >= 3:
                 default = ev(args[3]) if len(args) > 3 else ""
-                return self._read_ini_value(str(ev(args[0])), str(ev(args[1])),
-                                            str(ev(args[2])), default)
+                return self._read_ini_value(
+                    self._abs_path(ev(args[0])), str(ev(args[1])),
+                    str(ev(args[2])), default)
             if low == "splitpath" and args:
                 return self._split_path_builtin(args)
             if low == "string" and args:
@@ -1090,6 +1286,10 @@ class Runtime:
             return "v"
         if body in self.vars:
             return "v"
+        if re.match(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$", body):
+            base = body.split(".", 1)[0]
+            if base in self.vars:
+                return "v"
         if re.match(r"^[A-Za-z_]\w*\s*\(.*\)$", body, re.DOTALL):
             return "v"
         m = re.match(r"^([A-Za-z_]\w*)(?:\[.+?\])+$", body, re.DOTALL)
@@ -1403,6 +1603,8 @@ class Runtime:
             return obj[int(key) - 1]
         if isinstance(obj, dict):
             return obj[key] if key in obj else obj[str(key)]
+        if isinstance(obj, TrayMenu):
+            return getattr(obj, str(key).lower(), "")
         raise TypeError(f"cannot index {type(obj).__name__}")
 
     @staticmethod
@@ -1415,6 +1617,9 @@ class Runtime:
             raise IndexError("list assignment out of range")
         if isinstance(obj, dict):
             obj[key] = val
+            return
+        if isinstance(obj, TrayMenu) and kind == "key":
+            setattr(obj, str(key).lower(), val)
             return
         raise TypeError(f"cannot store into {type(obj).__name__}")
 
@@ -1580,7 +1785,8 @@ class Runtime:
         import os as _os
         pat = str(self._eval_expr(st.pattern)).replace("\\", _os.sep)
         if not _os.path.isabs(pat):
-            pat = _os.path.join(_os.getcwd(), pat)
+            pat = _os.path.join(
+                str(self.vars.get("A_WorkingDir") or _os.getcwd()), pat)
         try:
             files = sorted(_glob.glob(pat))
         except Exception as e:
@@ -1739,7 +1945,7 @@ class Runtime:
     def _ini(self, st: P.IniOp):
         import configparser
         import os
-        fname = str(self._eval_expr(st.filename))
+        fname = self._abs_path(self._eval_expr(st.filename))
         section = str(self._eval_expr(st.section))
         key = str(self._eval_expr(st.key))
         cfg = configparser.ConfigParser(interpolation=None, strict=False,
@@ -1973,6 +2179,8 @@ class Runtime:
             from .parser import _split_seq as _ss2
             _raw = [p.strip() for p in _ss2(argstr)] if argstr.strip() else []
             args = [p for p in _raw if p != ""]
+            if isinstance(obj, TrayMenu):
+                return obj.dispatch(meth, _raw, self)
             if meth == "push" and isinstance(obj, list):
                 obj.append(self._eval_expr(args[0]) if args else None)
                 return len(obj)
@@ -1991,6 +2199,10 @@ class Runtime:
                 return len(obj)
             if isinstance(obj, dict):
                 return obj.get(m.group(2), obj.get(prop, ""))
+            if isinstance(obj, TrayMenu):
+                if prop == "default":
+                    return obj.default or ""
+                return getattr(obj, m.group(2), "")
             if isinstance(obj, (list, dict)) or (
                     isinstance(obj, str) and m.group(1).strip() in self.vars):
                 return ""
