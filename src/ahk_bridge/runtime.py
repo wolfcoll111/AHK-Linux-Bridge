@@ -7,9 +7,13 @@ from __future__ import annotations
 import ast
 import datetime as _dt
 import os
+import queue
 import random
 import re
+import shlex
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from . import parser as P
@@ -160,7 +164,8 @@ class Runtime:
     def __init__(self, script: P.Script, sim, abort_keys=ABORT_KEYS,
                  max_loop=10_000, jitter: float = 0.0, seed=None,
                  script_path: str | None = None, args=(),
-                 working_dir: str | None = None, screen_size=None):
+                 working_dir: str | None = None, screen_size=None,
+                 allow_processes: bool = True):
         self.script = script
         self.sim = sim
         self.vars: dict = {}
@@ -174,6 +179,23 @@ class Runtime:
         self._exit_callbacks: list[tuple] = []
         self._exit_done = False
         self._error_callbacks: list[tuple] = []
+        # -- event surface (v0.5) --
+        self.allow_processes = allow_processes
+        self._timers: dict[str, dict] = {}
+        self._dynamic_hotkeys: dict[str, dict] = {}
+        self._suspended = False
+        self._paused = False
+        self._keep_alive = False
+        self._message_handlers: dict[int, list] = {}
+        self._message_queue: queue.Queue = queue.Queue()
+        self._message_lock = threading.RLock()
+        self._children: list[subprocess.Popen] = []
+        self._process_lock = threading.RLock()
+        self._ipc_path: str | None = None
+        self._ipc_dir: str | None = None
+        self._ipc_sock = None
+        self._ipc_thread: threading.Thread | None = None
+        self._ipc_stop = threading.Event()
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
 
     # -- built-in variables --
@@ -230,6 +252,7 @@ class Runtime:
             "A_ScreenHeight": int(screen_size[1]),
             "A_ScreenDPI": 96,
             "A_IsPaused": 0,
+            "A_IsSuspended": 0,
             "A_ScriptHwnd": 0,
             "A_Args": [str(a) for a in (args or [])],
         })
@@ -402,21 +425,323 @@ class Runtime:
         if self._abort.is_set():
             raise Aborted("aborted via master kill-switch")
 
+    # -- timers, hotkeys and the event loop --
+    def _callback_arg(self, raw) -> str:
+        """Resolve a callback/key argument without treating bare names as 0.
+
+        AHK callback arguments are function names, not expression lookups:
+        `SetTimer Background, 2000` must register ``Background`` even though
+        no variable by that name exists.
+        """
+        text = str(raw).strip()
+        if not text:
+            return ""
+        if "=>" in text:
+            return text
+        for _ in range(10):
+            m = re.search(r"%([A-Za-z_]\w*)%", text)
+            if not m:
+                break
+            text = (text[:m.start()] + str(self.vars.get(m.group(1), ""))
+                    + text[m.end():]).strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", text):
+            return str(self.vars[text]) if text in self.vars else text
+        if self._is_whole_quoted(text):
+            return self._interp(text[1:-1])
+        try:
+            return str(self._eval_expr(text))
+        except Exception:
+            return text
+
+    def _set_timer(self, name, period):
+        """Install/replace/remove a SetTimer entry (AHK period semantics)."""
+        label = self._callback_arg(name).strip()
+        if not label:
+            self.logs.append("SetTimer: empty name ignored")
+            return 0
+        try:
+            period = int(float(period))
+        except (TypeError, ValueError):
+            self.logs.append(f"SetTimer {label}: non-numeric period {period!r}")
+            return 0
+        key = label.lower()
+        if period == 0:
+            existed = self._timers.pop(key, None) is not None
+            self.logs.append(f"SetTimer {label} off")
+            return 1 if existed else 0
+        spec = self._callback_spec(label)
+        if spec is None:
+            self.logs.append(f"SetTimer {label}: unsupported callback (ignored)")
+            return 0
+        interval = max(1, abs(period)) / 1000.0
+        self._timers[key] = {
+            "name": label,
+            "period": period,
+            "due": time.monotonic() + interval,
+            "interval": interval,
+            "one_shot": period < 0,
+            "spec": spec,
+        }
+        return 1
+
+    def _process_due_timers(self) -> int:
+        """Run due timer callbacks on the script thread; return fire count."""
+        if self._paused:
+            return 0
+        now = time.monotonic()
+        fired = 0
+        for key, timer in list(self._timers.items()):
+            if now < timer["due"]:
+                continue
+            if timer["one_shot"]:
+                self._timers.pop(key, None)
+            else:
+                nxt = timer["due"] + timer["interval"]
+                timer["due"] = nxt if nxt > now else now + timer["interval"]
+            try:
+                self._invoke_callback(timer["spec"],
+                                      [timer["name"], timer["period"]])
+            except Aborted:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a timer must not kill the loop
+                if not self._dispatch_error(exc):
+                    self.logs.append(f"SetTimer {timer['name']} callback error: {exc}")
+            fired += 1
+        return fired
+
+    def _register_hotkey(self, raw_args: list):
+        """Handle both `Hotkey key, action, options` and call syntax."""
+        args = [str(a).strip() for a in raw_args]
+        if not args:
+            return 0
+        key = self._hotkey_key(args[0])
+        if not key:
+            self.logs.append("Hotkey: empty key ignored")
+            return 0
+        action_raw = args[1] if len(args) > 1 else ""
+        options = ""
+        if len(args) > 2:
+            try:
+                options = str(self._eval_expr(args[2])).strip()
+            except Exception:
+                options = str(args[2]).strip()
+        turning_off = options.lower().startswith("off")
+        if not action_raw or action_raw in ("0", '""', "''"):
+            self._dynamic_hotkeys.pop(key.lower(), None)
+            return 1
+        if "=>" in action_raw:
+            spec = self._callback_spec(action_raw)
+        else:
+            action = self._callback_arg(action_raw)
+            if not action or action in ("0", ""):
+                self._dynamic_hotkeys.pop(key.lower(), None)
+                return 1
+            spec = self._callback_spec(action) or self._callback_spec(action_raw)
+        if spec is None:
+            self.logs.append(f"Hotkey {key}: unsupported action {action_raw!r}")
+            return 0
+        if turning_off:
+            self._dynamic_hotkeys.pop(key.lower(), None)
+        else:
+            self._dynamic_hotkeys[key.lower()] = {
+                "key": key, "spec": spec, "options": options}
+        return 1
+
+    def _hotkey_key(self, raw: str) -> str:
+        return self._callback_arg(raw).strip().strip('"')
+
+    def _set_suspend(self, raw: str):
+        arg = str(raw or "").strip().strip('"').lower()
+        if arg in ("on", "1", "true"):
+            self._suspended = True
+        elif arg in ("off", "0", "false"):
+            self._suspended = False
+        elif arg == "permit":
+            return
+        else:
+            self._suspended = not self._suspended
+        self.vars["A_IsSuspended"] = 1 if self._suspended else 0
+
+    def _set_pause(self, raw: str):
+        arg = str(raw or "").strip().strip('"').lower()
+        if arg in ("on", "1", "true"):
+            self._paused = True
+        elif arg in ("off", "0", "false"):
+            self._paused = False
+        elif arg == "toggle":
+            self._paused = not self._paused
+        else:
+            self._paused = True
+        self.vars["A_IsPaused"] = 1 if self._paused else 0
+
+    def has_pending_events(self) -> bool:
+        """True when the runtime should stay alive to service hooks."""
+        if self._keep_alive or self._timers or self._dynamic_hotkeys:
+            return True
+        with self._process_lock:
+            return any(child.poll() is None for child in self._children)
+
+    def _drain_messages(self):
+        """Dispatch messages queued from timers, IPC or PostMessage."""
+        while True:
+            try:
+                item = self._message_queue.get_nowait()
+            except queue.Empty:
+                return
+            msg, wparam, lparam, hwnd = item
+            self._dispatch_message(msg, wparam, lparam, hwnd)
+
+    def wait(self, timeout: float | None = None, poll: float = 0.01) -> int:
+        """Service timers, messages and children until nothing keeps us alive.
+
+        Returns the number of timer/message events processed. ``timeout`` is
+        wall-clock seconds; without it a persistent script waits indefinitely.
+        """
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        processed = 0
+        while True:
+            self._check()
+            processed += self._process_due_timers()
+            self._drain_messages()
+            if not self.has_pending_events():
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(poll)
+        return processed
+
     # -- entry points --
-    def run_auto(self):
+    def run_auto(self, exit_callbacks: bool = True):
         try:
             self._exec_reporting(self.script.auto_section)
         except Aborted:
             raise
         else:
-            self._run_exit_callbacks("Exit", 0)
+            if exit_callbacks:
+                self._run_exit_callbacks("Exit", 0)
 
     def fire_hotkey(self, key: str):
         for hk in self.script.hotkeys:
             if hk.key.lower() == key.lower():
                 self._exec_reporting(hk.body)
                 return True
+        if self._suspended:
+            return False
+        dynamic = self._dynamic_hotkeys.get(key.lower())
+        if dynamic is not None:
+            self._invoke_callback(dynamic["spec"], [])
+            return True
         return False
+
+    # -- Windows-message surface (in-process + IPC) --
+    @staticmethod
+    def _message_int(value, default=0) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        try:
+            return int(str(value).strip(), 0)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+    def _message_id(self, raw) -> int | None:
+        try:
+            value = self._eval_expr(raw)
+        except Exception:
+            value = raw
+        if isinstance(value, str):
+            try:
+                return int(value.strip(), 0)
+            except ValueError:
+                return None
+        if isinstance(value, int):
+            return value
+        return None
+
+    def _register_message(self, raw_args: list):
+        if not raw_args:
+            return 0
+        msg = self._message_id(raw_args[0])
+        if msg is None:
+            self.logs.append(f"OnMessage: invalid message id {raw_args[0]!r}")
+            return 0
+        if len(raw_args) < 2:
+            self._message_handlers.pop(msg, None)
+            return 1
+        callback_raw = str(raw_args[1]).strip()
+        if not callback_raw or callback_raw in ("0", '""', "''"):
+            self._message_handlers.pop(msg, None)
+            return 1
+        spec = self._callback_spec(callback_raw)
+        if spec is None:
+            try:
+                callback_value = self._eval_expr(callback_raw)
+            except Exception:
+                callback_value = callback_raw
+            if callback_value in (0, "", None):
+                self._message_handlers.pop(msg, None)
+                return 1
+            if isinstance(callback_value, str):
+                spec = self._callback_spec(callback_value)
+        if spec is None:
+            self.logs.append(
+                f"OnMessage {msg:#x}: unsupported callback {callback_raw!r}")
+            return 0
+        handlers = self._message_handlers.setdefault(msg, [])
+        if spec not in handlers:
+            handlers.append(spec)
+        return 1
+
+    def _dispatch_message(self, msg: int, wparam=0, lparam=0, hwnd=0):
+        msg = self._message_int(msg)
+        wparam = self._message_int(wparam)
+        lparam = self._message_int(lparam)
+        hwnd = self._message_int(hwnd)
+        result = 0
+        with self._message_lock:
+            for spec in list(self._message_handlers.get(msg, [])):
+                try:
+                    result = self._invoke_callback(
+                        spec, [wparam, lparam, msg, hwnd])
+                except Aborted:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - handler must not kill loop
+                    if not self._dispatch_error(exc):
+                        self.logs.append(
+                            f"OnMessage {msg:#x} callback error: {exc}")
+        return result
+
+    def _message_args(self, raw_args: list):
+        def val(index, default=0):
+            if index >= len(raw_args):
+                return default
+            try:
+                return self._eval_expr(str(raw_args[index]).strip())
+            except Exception:
+                return default
+        return (self._message_int(val(0)),
+                self._message_int(val(1)),
+                self._message_int(val(2)),
+                val(3, ""), val(4, ""))
+
+    def _post_message(self, raw_args: list, synchronous: bool = False):
+        """Handle PostMessage/SendMessage command and call syntax.
+
+        Local delivery is real: PostMessage queues and SendMessage dispatches
+        immediately.  When this process was launched by another bridge runtime
+        (``AHK_BRIDGE_IPC`` set) the message is routed to that parent instead.
+        """
+        if not raw_args:
+            return 0
+        msg, wparam, lparam, _control, _title = self._message_args(raw_args)
+        if synchronous:
+            return self._dispatch_message(msg, wparam, lparam)
+        self._message_queue.put((msg, wparam, lparam, 0))
+        return 0
 
     def expand_hotstring(self, trigger: str):
         for hs in self.script.hotstrings:
@@ -567,6 +892,8 @@ class Runtime:
                 m = re.search(r"-?\d+", st.args or "")
                 if m:
                     self.vars["A_KeyDelay"] = int(m.group(0))
+            elif name == "#persistent":
+                self._keep_alive = True
             elif st.name.lower() != "label":
                 self.logs.append(f"setting {st.name} {st.args} (noted, linux no-op)")
         elif isinstance(st, P.Include):
@@ -839,6 +1166,15 @@ class Runtime:
         if low == "sleep" and c.args:
             self.sim.sleep_ms(self._resolve_sleep(c.args[0]))
             return ""
+        if low == "settimer" and c.args:
+            period = self._eval_expr(c.args[1]) if len(c.args) > 1 else 250
+            return self._set_timer(c.args[0], period)
+        if low == "hotkey" and c.args:
+            return self._register_hotkey(c.args)
+        if low == "onmessage":
+            return self._register_message(c.args)
+        if low in ("postmessage", "sendmessage"):
+            return self._post_message(c.args, synchronous=low == "sendmessage")
         if low == "imagesearch":
             return self._image_search(c.args)
         if low in ("send", "sendinput", "sendevent", "sendplay", "sendtext") and c.args:
@@ -1088,6 +1424,13 @@ class Runtime:
         builtins become logged stubs returning falsy (documented gap)."""
         ev = lambda a: self._eval_expr(a)
         try:
+            if low == "getkeystate" and args:
+                key = str(ev(args[0])).strip().lower()
+                if key in ("pause", "p"):
+                    return 1 if self._paused else 0
+                if key == "suspend":
+                    return 1 if self._suspended else 0
+                return 0
             if low == "random" and len(args) >= 2:
                 lo, hi = int(ev(args[0])), int(ev(args[1]))
                 lo, hi = (lo, hi) if lo <= hi else (hi, lo)
@@ -1880,8 +2223,31 @@ class Runtime:
         if low in ("soundbeep", "soundplay"):
             self.logs.append(f"{st.name} (no audio on headless bridge)")
             return
-        if low in ("reload", "pause", "suspend", "edit", "listvars",
-                   "keyhistory", "exit"):
+        if low == "settimer":
+            parts = [p.strip() for p in P._split_seq(rest)]
+            name = parts[0] if parts else ""
+            period = 250
+            if len(parts) > 1:
+                try:
+                    period = self._eval_expr(parts[1])
+                except Exception:
+                    period = parts[1]
+            self._set_timer(name, period)
+            return
+        if low == "hotkey":
+            self._register_hotkey(P._split_seq(rest))
+            return
+        if low in ("postmessage", "sendmessage"):
+            self._post_message(P._split_seq(rest),
+                               synchronous=(low == "sendmessage"))
+            return
+        if low == "suspend":
+            self._set_suspend(rest)
+            return
+        if low == "pause":
+            self._set_pause(rest)
+            return
+        if low in ("reload", "edit", "listvars", "keyhistory", "exit"):
             self.logs.append(f"{st.name} {rest} (noted, linux no-op)")
             return
         if low == "splitpath":
