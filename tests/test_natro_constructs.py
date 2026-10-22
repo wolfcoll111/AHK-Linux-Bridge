@@ -184,6 +184,82 @@ def test_onerror_unhandled_still_raises_and_can_be_removed():
         rt.run_auto()
 
 
+def test_file_builtins_and_relative_working_directory(tmp_path):
+    base = str(tmp_path)
+    text = (
+        f'DirCreate "{base}\\sub"\n'
+        f'FileAppend "hello", "{base}\\sub\\a.txt"\n'
+        f'FileCopy "{base}\\sub\\a.txt", "{base}\\sub\\b.txt"\n'
+        f'Send FileExist("{base}\\sub\\b.txt")\n'
+        f'Send FileExist("{base}\\sub")\n'
+        f'Send FileExist("{base}\\missing.txt")\n'
+        f'Send FileRead("{base}\\sub\\b.txt")\n'
+        f'Send FileGetSize("{base}\\sub\\b.txt")\n'
+        f'FileMove "{base}\\sub\\b.txt", "{base}\\sub\\c.txt"\n'
+        f'Send FileExist("{base}\\sub\\c.txt")\n'
+        f'FileDelete "{base}\\sub\\c.txt"\n'
+        f'Send FileExist("{base}\\sub\\c.txt")\n'
+        f'FileDelete "{base}\\sub\\a.txt"\n'
+        f'DirDelete "{base}\\sub"\n'
+        f'Send FileExist("{base}\\sub")\n'
+    )
+    sc, rt, sim = run(text, working_dir=base)
+    rt.run_auto()
+    assert types(sim) == ["A", "D", "hello", "5", "A"]
+    assert os.path.exists(tmp_path / "sub") is False
+
+
+def test_type_conversions_and_environment_builtins(monkeypatch):
+    monkeypatch.delenv("AHK_BRIDGE_TEST_VAR", raising=False)
+    sc, rt, sim = run(
+        "Send Type(1)\n"
+        "Send Type(1.5)\n"
+        'Send Type("x")\n'
+        "Send Type([1])\n"
+        "Send Type(Map())\n"
+        "Send Integer(\"3.9\")\n"
+        "Send Float(\"2.5\")\n"
+        'Send Ord("A")\n'
+        "Send Chr(66)\n"
+        'EnvSet("AHK_BRIDGE_TEST_VAR", "v")\n'
+        'Send EnvGet("AHK_BRIDGE_TEST_VAR")\n'
+    )
+    rt.run_auto()
+    assert types(sim) == [
+        "Integer", "Float", "String", "Array", "Map",
+        "3", "2.5", "65", "B", "v"]
+
+
+def test_map_and_array_methods_and_for_pairs():
+    sc, rt, sim = run(
+        'm := Map("a", 1, "b", 2)\n'
+        'Send m.Has("a")\n'
+        'Send m.Has("z")\n'
+        'Send m.Get("b")\n'
+        'Send m.Delete("a")\n'
+        "Send m.Has(\"a\")\n"
+        "arr := [1, 2]\n"
+        "arr.Push(3)\n"
+        "Send arr.Length\n"
+        "Send arr.Pop()\n"
+        "arr.InsertAt(2, 9)\n"
+        "Send arr[2]\n"
+        "Send arr.RemoveAt(1)\n"
+        "for k, v in m {\n"
+        "    Send k\n"
+        "    Send v\n"
+        "}\n"
+    )
+    rt.run_auto()
+    assert types(sim) == ["1", "0", "2", "1", "0", "3", "3", "9", "1", "b", "2"]
+
+
+def test_noarg_oserror_throws_named_error():
+    sc, rt, sim = run("Throw OSError()\n")
+    with pytest.raises(RuntimeError, match="OSError"):
+        rt.run_auto()
+
+
 def test_splitpath_call_and_command_byref_outputs():
     text = (
         'SplitPath("/home/user/My File.txt", &name, &dir, &ext, &noext, &drive)\n'

@@ -670,6 +670,87 @@ class Runtime:
         obj = self._eval_expr(base_expr)
         if isinstance(obj, TrayMenu):
             return True, obj.dispatch(method, raw_args, self)
+        return self._collection_method(obj, method, raw_args)
+
+    def _collection_method(self, obj, method: str, raw_args: list):
+        """AHK v2 Map/Array methods used by the corpus."""
+        m = method.lower()
+
+        def val(i, default=None):
+            return self._eval_expr(raw_args[i]) if i < len(raw_args) else default
+
+        if isinstance(obj, dict):
+            if m == "has":
+                try:
+                    return True, 1 if val(0) in obj else 0
+                except TypeError:
+                    return True, 0
+            if m in ("delete", "remove"):
+                try:
+                    existed = val(0) in obj
+                    if existed:
+                        del obj[val(0)]
+                    return True, 1 if existed else 0
+                except (TypeError, KeyError):
+                    return True, 0
+            if m == "clone":
+                return True, dict(obj)
+            if m == "clear":
+                obj.clear()
+                return True, ""
+            if m == "get":
+                key = val(0)
+                try:
+                    return True, obj[key] if key in obj else val(1, "")
+                except TypeError:
+                    return True, val(1, "")
+            if m == "set":
+                obj[val(0)] = val(1)
+                return True, obj
+            if m in ("count", "length"):
+                return True, len(obj)
+            if m == "__enum":
+                return True, list(obj.items())
+        if isinstance(obj, list):
+            if m == "push":
+                obj.append(val(0))
+                return True, len(obj)
+            if m == "pop":
+                return True, obj.pop() if obj else ""
+            if m == "insertat":
+                try:
+                    index = int(val(0)) - 1
+                    if 0 <= index <= len(obj):
+                        obj.insert(index, val(1))
+                        return True, ""
+                except (TypeError, ValueError):
+                    pass
+                return True, ""
+            if m in ("removeat", "delete"):
+                try:
+                    index = int(val(0)) - 1
+                    if 0 <= index < len(obj):
+                        return True, obj.pop(index)
+                except (TypeError, ValueError):
+                    pass
+                return True, ""
+            if m == "has":
+                try:
+                    index = int(val(0)) - 1
+                    return True, 1 if 0 <= index < len(obj) else 0
+                except (TypeError, ValueError):
+                    return True, 0
+            if m == "clone":
+                return True, list(obj)
+            if m == "clear":
+                obj.clear()
+                return True, ""
+            if m in ("count", "length"):
+                return True, len(obj)
+            if m == "__enum":
+                return True, list(obj)
+        if isinstance(obj, str) and m == "length":
+            return True, len(obj)
         return False, None
 
     def _call_value(self, c: P.FuncCall):
@@ -997,6 +1078,11 @@ class Runtime:
             self.logs.append(f"stub {name}() -> falsy (Gdip surface not ported)")
         return ""
 
+    def _log_once(self, message: str):
+        if message not in self._stub_warned:
+            self._stub_warned.add(message)
+            self.logs.append(message)
+
     def _pure_builtin(self, low: str, args: list):
         """Side-effect-free builtins usable inside expressions. Unknown GUI/OS
         builtins become logged stubs returning falsy (documented gap)."""
@@ -1086,10 +1172,13 @@ class Runtime:
             if low == "isset" and args:
                 name = str(args[0]).strip().lstrip("&")
                 return 1 if name in self.vars else 0
-            if low in ("error", "typeerror", "valueerror", "oserror") and args:
+            if low in ("error", "typeerror", "valueerror", "oserror"):
                 # Error objects: carry the message so `throw Error("msg")`
                 # surfaces it; property access beyond .Message is a gap.
-                return str(ev(args[0]))
+                return (str(ev(args[0])) if args
+                        else {"error": "Error", "typeerror": "TypeError",
+                              "valueerror": "ValueError",
+                              "oserror": "OSError"}[low])
             if low == "buffer":
                 return ""
             if low == "iniread" and len(args) >= 3:
@@ -1097,6 +1186,150 @@ class Runtime:
                 return self._read_ini_value(
                     self._abs_path(ev(args[0])), str(ev(args[1])),
                     str(ev(args[2])), default)
+            if low == "fileexist" and args:
+                import glob as _glob
+                path = self._abs_path(ev(args[0]))
+                if any(ch in path for ch in "*?["):
+                    hits = sorted(_glob.glob(path))
+                    if not hits:
+                        return ""
+                    path = hits[0]
+                if os.path.isfile(path):
+                    return "A"
+                if os.path.isdir(path):
+                    return "D"
+                return ""
+            if low == "fileread" and args:
+                try:
+                    with open(self._abs_path(ev(args[0])),
+                              encoding="utf-8-sig") as fh:
+                        return fh.read()
+                except (OSError, UnicodeError) as exc:
+                    self._log_once(f"FileRead failed: {exc}")
+                    return ""
+            if low == "fileappend" and len(args) >= 2:
+                try:
+                    with open(self._abs_path(ev(args[1])), "a",
+                              encoding="utf-8") as fh:
+                        fh.write(self._to_ahk_string(ev(args[0])))
+                    return 1
+                except OSError as exc:
+                    self._log_once(f"FileAppend failed: {exc}")
+                    return 0
+            if low == "filedelete" and args:
+                import glob as _glob
+                path = self._abs_path(ev(args[0]))
+                hits = _glob.glob(path) if any(c in path for c in "*?[") else [path]
+                removed = 0
+                for hit in hits:
+                    try:
+                        if os.path.isfile(hit):
+                            os.remove(hit)
+                            removed += 1
+                    except OSError as exc:
+                        self._log_once(f"FileDelete failed: {exc}")
+                return removed
+            if low in ("filecopy", "filemove") and len(args) >= 2:
+                import shutil as _shutil
+                src = self._abs_path(ev(args[0]))
+                dst = self._abs_path(ev(args[1]))
+                overwrite = bool(int(ev(args[2]))) if len(args) > 2 else False
+                try:
+                    if os.path.exists(dst) and not overwrite:
+                        return 0
+                    (_shutil.copy2 if low == "filecopy" else _shutil.move)(src, dst)
+                    return 1
+                except (OSError, PermissionError) as exc:
+                    self._log_once(f"{low} failed: {exc}")
+                    return 0
+            if low == "dircreate" and args:
+                try:
+                    os.makedirs(self._abs_path(ev(args[0])), exist_ok=True)
+                    return 1
+                except OSError as exc:
+                    self._log_once(f"DirCreate failed: {exc}")
+                    return 0
+            if low == "dirdelete" and args:
+                import shutil as _shutil
+                recurse = bool(int(ev(args[1]))) if len(args) > 1 else False
+                path = self._abs_path(ev(args[0]))
+                try:
+                    (_shutil.rmtree if recurse else os.rmdir)(path)
+                    return 1
+                except OSError as exc:
+                    self._log_once(f"DirDelete failed: {exc}")
+                    return 0
+            if low == "filegetsize" and args:
+                try:
+                    size = os.path.getsize(self._abs_path(ev(args[0])))
+                except OSError:
+                    return 0
+                unit = str(ev(args[1])).upper() if len(args) > 1 else "B"
+                if unit == "K":
+                    size = (size + 1023) // 1024
+                elif unit == "M":
+                    size = (size + 1024 * 1024 - 1) // (1024 * 1024)
+                return size
+            if low == "filegettime" and args:
+                try:
+                    stamp = os.path.getmtime(self._abs_path(ev(args[0])))
+                except OSError:
+                    return ""
+                which = str(ev(args[1])).upper() if len(args) > 1 else "M"
+                key = {"C": "st_ctime", "A": "st_atime"}.get(which, "st_mtime")
+                dt = _dt.datetime.fromtimestamp(
+                    getattr(os.stat(self._abs_path(ev(args[0]))), key))
+                return dt.strftime("%Y%m%d%H%M%S")
+            if low == "envget" and args:
+                return os.environ.get(str(ev(args[0])), "")
+            if low == "envset" and len(args) >= 2:
+                name = str(ev(args[0]))
+                if name:
+                    os.environ[name] = self._to_ahk_string(ev(args[1]))
+                return 1
+            if low == "type" and args:
+                v = ev(args[0])
+                if isinstance(v, bool):
+                    return "Integer"
+                if isinstance(v, int):
+                    return "Integer"
+                if isinstance(v, float):
+                    return "Float"
+                if isinstance(v, str):
+                    return "String"
+                if isinstance(v, list):
+                    return "Array"
+                if isinstance(v, dict):
+                    return "Map"
+                if isinstance(v, TrayMenu):
+                    return "Object"
+                return "Object"
+            if low in ("integer", "float") and args:
+                v = self._to_ahk_number(ev(args[0]))
+                return int(float(v)) if low == "integer" else float(v)
+            if low == "ord" and args:
+                s = str(ev(args[0]))
+                return ord(s[0]) if s else 0
+            if low == "chr" and args:
+                try:
+                    return chr(int(ev(args[0])))
+                except (TypeError, ValueError, OverflowError):
+                    return ""
+            if low == "objhasownprop" and len(args) >= 2:
+                obj, key = ev(args[0]), str(ev(args[1]))
+                return 1 if isinstance(obj, dict) and key in obj else 0
+            if low == "objget" and len(args) >= 2:
+                obj, key = ev(args[0]), str(ev(args[1]))
+                if isinstance(obj, dict):
+                    return obj.get(key, ev(args[2]) if len(args) > 2 else "")
+                return ""
+            if low == "objset" and len(args) >= 3:
+                obj, key = ev(args[0]), str(ev(args[1]))
+                if isinstance(obj, dict):
+                    obj[key] = ev(args[2])
+                return 1
+            if low == "varsetstrcapacity" and args:
+                return 1
             if low == "splitpath" and args:
                 return self._split_path_builtin(args)
             if low == "string" and args:
@@ -1291,6 +1524,10 @@ class Runtime:
             if base in self.vars:
                 return "v"
         if re.match(r"^[A-Za-z_]\w*\s*\(.*\)$", body, re.DOTALL):
+            return "v"
+        m = re.match(r"^([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)+\s*\(.*\)$",
+                     body, re.DOTALL)
+        if m and m.group(1) in self.vars:
             return "v"
         m = re.match(r"^([A-Za-z_]\w*)(?:\[.+?\])+$", body, re.DOTALL)
         if m and m.group(1) in self.vars:
@@ -1654,6 +1891,25 @@ class Runtime:
             for index, part in enumerate(parts[1:6]):
                 self._assign_output(part, values[index])
             return
+        if low in ("fileappend", "fileread", "filedelete", "filecopy",
+                   "filemove", "dircreate", "dirdelete"):
+            parts = [p.strip() for p in P._split_seq(rest)]
+            if low == "fileread" and len(parts) >= 2:
+                self.vars[parts[0].lstrip("&").strip()] = self._pure_builtin(
+                    "fileread", [parts[1]])
+                return
+            if low == "fileappend":
+                if len(parts) >= 2:
+                    self._pure_builtin("fileappend", [parts[0], parts[1]])
+                elif parts:
+                    self._pure_builtin("fileappend", ['"`n"', parts[0]])
+                return
+            if low in ("filecopy", "filemove") and len(parts) >= 2:
+                self._pure_builtin(low, parts[:3])
+                return
+            if parts:
+                self._pure_builtin(low, parts[:2])
+                return
         self.logs.append(f"{st.name} {rest} (OS/window op, linux no-op)")
 
     @staticmethod
@@ -1838,23 +2094,27 @@ class Runtime:
             self.logs.append(f"KeyWait {st.key} [{st.options}] approximated as 100ms "
                              "(no global key grab on Linux yet)")
 
-    def _iter_values(self, expr: str):
-        """Resolve `for x in <expr>` to a list of values, or None to skip."""
+    def _iter_values(self, expr: str, pairs: bool = False):
+        """Resolve `for x in <expr>` to a list of values, or None to skip.
+
+        Map iteration follows AHK: one variable receives each key, two
+        variables receive (key, value) pairs.
+        """
         val = self._eval_expr(expr)
         if isinstance(val, (list, tuple)):
             return list(val)
         if isinstance(val, dict):
-            return list(val.values())
+            return list(val.items()) if pairs else list(val.keys())
         if isinstance(val, (int, float)):
             return list(range(1, int(val) + 1))
         return None
 
     def _for(self, st: P.For):
-        vals = self._iter_values(st.iterable)
+        targets = st.targets[:2]
+        vals = self._iter_values(st.iterable, pairs=len(targets) == 2)
         if vals is None:
             self.logs.append(f"for: unsupported enumerable {st.iterable!r} (skipped)")
             return
-        targets = st.targets[:2]
         saved = {t: self.vars.get(t, None) for t in targets}
         saved_index = self.vars.get("A_Index")
         try:
@@ -2181,13 +2441,9 @@ class Runtime:
             args = [p for p in _raw if p != ""]
             if isinstance(obj, TrayMenu):
                 return obj.dispatch(meth, _raw, self)
-            if meth == "push" and isinstance(obj, list):
-                obj.append(self._eval_expr(args[0]) if args else None)
-                return len(obj)
-            if meth == "length" and isinstance(obj, (list, str, dict)):
-                return len(obj)
-            if isinstance(obj, str) and meth in ("length",):
-                return len(obj)
+            handled, result = self._collection_method(obj, meth, _raw)
+            if handled:
+                return result
             self.logs.append(f"method .{meth}() unsupported (logged)")
             return ""
         # AHK rule: `a.b` (no spaces) is object access, `a . b` is concat.
@@ -2383,6 +2639,8 @@ class Runtime:
         if re.search(r"[+\-*/%]", term):
             return True
         if re.match(r"^[A-Za-z_]\w*\s*\(", term):
+            return True
+        if re.match(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\s*\(", term):
             return True
         if re.search(r"\[[^\]]+\]", term):
             return True
