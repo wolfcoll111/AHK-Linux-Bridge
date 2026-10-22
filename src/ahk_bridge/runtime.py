@@ -2900,11 +2900,14 @@ class Runtime:
                 return 1 if self._cond(s) else 0
             except Exception:
                 pass
-        # dotted string concat with vars: "a" . x  (AHK v2 `.` operator)
-        if "." in s:
-            parts = [p.strip() for p in s.split(".")]
+        # dotted string concat with vars: "a" . x  (AHK v2 `.` operator).
+        # Split only top-level operator dots (surrounded by whitespace), so
+        # periods inside strings (`"empty.**"`), decimals (`1.5`) and
+        # property access (`obj.prop`) are left intact.
+        dot_parts = self._split_dot_concat(s)
+        if dot_parts:
             try:
-                return "".join(str(self._eval_expr(p)) for p in parts if p != "")
+                return "".join(str(self._eval_expr(p)) for p in dot_parts)
             except Exception:
                 pass
         # bare int?
@@ -2916,6 +2919,58 @@ class Runtime:
         if re.match(r"^[A-Za-z_]\w*$", s):
             return self.vars.get(s, 0)
         return s
+
+    @staticmethod
+    def _split_dot_concat(s: str):
+        """Split a top-level AHK ``.`` concat, ignoring quoted/bracketed dots.
+
+        Returns ``None`` unless at least one operator dot is found.  A dot
+        counts as an operator only when it is outside quotes/brackets and has
+        whitespace on at least one side; that keeps ``1.5`` and ``obj.prop``
+        intact while accepting both ``a . b`` and ``a. b``.
+        """
+        parts: list[str] = []
+        cur = ""
+        depth, quote, k = 0, None, 0
+        found = False
+        while k < len(s):
+            ch = s[k]
+            if ch == "`" and k + 1 < len(s):
+                cur += s[k:k + 2]
+                k += 2
+                continue
+            if quote:
+                cur += ch
+                if ch == quote:
+                    quote = None
+            elif ch in ('"', "'"):
+                quote = ch
+                cur += ch
+            elif ch in "([":
+                depth += 1
+                cur += ch
+            elif ch in ")]":
+                depth = max(0, depth - 1)
+                cur += ch
+            elif ch == "." and depth == 0:
+                before = s[k - 1] if k else ""
+                after = s[k + 1] if k + 1 < len(s) else ""
+                if before.isspace() or after.isspace():
+                    parts.append(cur)
+                    cur = ""
+                    found = True
+                else:
+                    cur += ch
+            else:
+                cur += ch
+            k += 1
+        if not found:
+            return None
+        parts.append(cur)
+        parts = [p.strip() for p in parts]
+        if any(not p for p in parts):
+            return None
+        return parts
 
     @staticmethod
     def _is_whole_quoted(s: str) -> bool:

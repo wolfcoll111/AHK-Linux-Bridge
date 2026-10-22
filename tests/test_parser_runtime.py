@@ -170,3 +170,28 @@ def test_braceless_if_does_not_steal_enclosing_else():
     assert len(outer_if.else_body) == 1            # else belongs to the outer if
     rt.run_auto()
     assert rt.vars.get("y") == 2
+
+
+def test_dot_concat_keeps_periods_inside_strings_and_nested_ternary():
+    # Regression: the fallback split every "." including periods inside
+    # string literals, corrupting `"**\n" . (cond ? ... : "empty.**")`
+    # into a raw expression plus bogus calls to `Enabled()`/`n()`.
+    sc, rt, sim = run(
+        'ocr_enabled := 0\n'
+        'ocr_language := ""\n'
+        'message := "**\\n" . (ocr_enabled ? "Enabled (" ocr_language ")" : "Disabled.**")\n'
+        'Send message\n'
+    )
+    rt.run_auto()
+    assert ("type", "**\\nDisabled.**") in [(e[0], e[1]) for e in sim.log]
+
+
+def test_dot_concat_enabled_branch_keeps_unbalanced_paren_in_string():
+    sc, rt, sim = run(
+        'ocr_enabled := 1\n'
+        'ocr_language := "en-"\n'
+        'message := "**\\n" . (ocr_enabled ? "Enabled (" ocr_language ")" : "Disabled.**")\n'
+        'Send message\n'
+    )
+    rt.run_auto()
+    assert ("type", "**\\nEnabled (en-)") in [(e[0], e[1]) for e in sim.log]
