@@ -2,7 +2,9 @@
 from __future__ import annotations
 import argparse
 import json
+import signal
 import sys
+import threading
 import time
 from .parser import parse_script
 from .includes import load_script
@@ -41,6 +43,16 @@ def cmd_run(args) -> int:
     rt = Runtime(script, sim, max_loop=args.max_loop, jitter=args.jitter,
                  seed=args.seed, script_path=args.script,
                  args=script_args, screen_size=screen_size)
+    old_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        def _on_signal(_signum, _frame):
+            rt.abort()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                old_handlers[sig] = signal.getsignal(sig)
+                signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass
     try:
         repeats = max(1, args.repeat)
         for rep in range(repeats):
@@ -51,9 +63,13 @@ def cmd_run(args) -> int:
                 if not ok:
                     return 1
             else:
-                rt.run_auto()
+                rt.run_auto(exit_callbacks=False)
             if args.delay_ms and rep < repeats - 1:
                 sim.sleep_ms(args.delay_ms)
+        if (not args.hotkey and (args.wait or args.exit_after is not None
+                                 or rt.has_pending_events())):
+            rt.wait(timeout=args.exit_after)
+        rt._run_exit_callbacks("Exit", 0)
         for line in rt.logs:
             print(line)
         if isinstance(getattr(sim, "log", None), list):
@@ -63,6 +79,12 @@ def cmd_run(args) -> int:
         print(f"aborted: {e}", file=sys.stderr)
         return 3
     finally:
+        rt._shutdown_ipc()
+        for sig, handler in old_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
         sim.close()
 
 
@@ -274,6 +296,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="randomize Sleep by fraction, e.g. 0.2 = ±20%% (anti-AFK)")
     r.add_argument("--seed", type=int, default=None, help="RNG seed for --jitter/Random()")
     r.add_argument("--max-loop", type=int, default=10_000, help="cap for infinite Loop{}")
+    r.add_argument("--wait", action="store_true",
+                   help="stay alive to service timers, messages, hotkeys and children")
+    r.add_argument("--exit-after", type=float, default=None, metavar="SECONDS",
+                   help="wait at most SECONDS for timers/messages, then exit")
     r.add_argument("--list-hotkeys", action="store_true", help="list hotkeys/hotstrings and exit")
     r.set_defaults(fn=cmd_run)
     c = sub.add_parser("check", help="show backend + permission status")

@@ -262,7 +262,7 @@ def runtime_worker(path: str, max_loop: int, deadline: float | None = None) -> d
         return {"file": path, "load_error": f"{type(exc).__name__}: {exc}",
                 "logs": [], "seconds": 0.0, "warnings": []}
     sim = DryBackend()
-    rt = R.Runtime(script, sim, max_loop=max_loop)
+    rt = R.Runtime(script, sim, max_loop=max_loop, allow_processes=False)
     error = None
     census_errors: list[str] = []
     deadline_hit = False

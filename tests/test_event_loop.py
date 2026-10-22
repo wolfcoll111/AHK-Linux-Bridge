@@ -182,3 +182,27 @@ def test_message_handler_exception_is_logged_and_other_handlers_run():
     )
     assert rt.vars["ok"] == 1
     assert any("handler boom" in line for line in rt.logs)
+
+
+def test_cli_waits_for_pending_timer_and_honors_exit_after(tmp_path, capsys):
+    from ahk_bridge.cli import build_parser, cmd_run
+
+    fired = tmp_path / "timer.ahk"
+    fired.write_text(
+        "SetTimer Done, -20\n"
+        "Done() {\n"
+        '    MsgBox "timer fired"\n'
+        "}\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        ["run", "--backend", "dry", str(fired)])
+    assert cmd_run(args) == 0
+    assert "MsgBox: timer fired" in capsys.readouterr().out
+
+    long_timer = tmp_path / "long.ahk"
+    long_timer.write_text("SetTimer Tick, 100000\nTick() {\n}\n",
+                          encoding="utf-8")
+    args = build_parser().parse_args(
+        ["run", "--backend", "dry", "--exit-after", "0.02", str(long_timer)])
+    started = time.monotonic()
+    assert cmd_run(args) == 0
+    assert time.monotonic() - started < 1.0

@@ -6,11 +6,14 @@ Loop/Sleep var resolution, {Key} send-sequences, live PixelSearch + WinActivate.
 from __future__ import annotations
 import ast
 import datetime as _dt
+import json
 import os
 import queue
 import random
 import re
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -370,6 +373,7 @@ class Runtime:
             self.logs.append("OnExit callback returned non-zero; exit prevented")
         else:
             self._exit_done = True
+            self._shutdown_ipc()
         return prevented
 
     def _dispatch_error(self, exc: Exception) -> bool:
@@ -576,7 +580,8 @@ class Runtime:
 
     def has_pending_events(self) -> bool:
         """True when the runtime should stay alive to service hooks."""
-        if self._keep_alive or self._timers or self._dynamic_hotkeys:
+        if (self._keep_alive or self._timers or self._dynamic_hotkeys
+                or self._message_handlers):
             return True
         with self._process_lock:
             return any(child.poll() is None for child in self._children)
@@ -737,10 +742,284 @@ class Runtime:
         """
         if not raw_args:
             return 0
-        msg, wparam, lparam, _control, _title = self._message_args(raw_args)
+        msg, wparam, lparam, _control, title = self._message_args(raw_args)
+        # SendMessage with no target is a self-send; submacro PostMessage with
+        # no target goes to the parent (AHK broadcasts to sibling scripts).
+        if synchronous and not str(title).strip():
+            return self._dispatch_message(msg, wparam, lparam)
+        payload = {"type": "send" if synchronous else "post",
+                   "msg": msg, "w": wparam, "l": lparam,
+                   "pid": os.getpid()}
+        sent, reply = self._send_parent(payload, expect_reply=synchronous)
+        if sent:
+            if synchronous and isinstance(reply, dict):
+                return self._message_int(reply.get("result", 0))
+            return 0
         if synchronous:
             return self._dispatch_message(msg, wparam, lparam)
         self._message_queue.put((msg, wparam, lparam, 0))
+        return 0
+
+    # -- IPC transport for Run-spawned submacros --
+    def _ensure_ipc(self) -> str | None:
+        if self._ipc_path:
+            return self._ipc_path
+        if not self.allow_processes:
+            return None
+        try:
+            self._ipc_dir = tempfile.mkdtemp(prefix="ahk-bridge-ipc-")
+            path = os.path.join(self._ipc_dir, "sock")
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.bind(path)
+            os.chmod(path, 0o600)
+            sock.listen(8)
+            sock.settimeout(0.2)
+        except OSError as exc:
+            self._log_once(f"IPC unavailable: {exc}")
+            self._ipc_dir = None
+            return None
+        self._ipc_path = path
+        self._ipc_sock = sock
+        self._ipc_stop.clear()
+        self._ipc_thread = threading.Thread(
+            target=self._ipc_loop, name="ahk-bridge-ipc", daemon=True)
+        self._ipc_thread.start()
+        return path
+
+    def _ipc_loop(self):
+        sock = self._ipc_sock
+        while not self._ipc_stop.is_set() and sock is not None:
+            try:
+                conn, _addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle_ipc_conn, args=(conn,),
+                             name="ahk-bridge-ipc-msg", daemon=True).start()
+
+    def _handle_ipc_conn(self, conn):
+        try:
+            conn.settimeout(2.0)
+            buf = b""
+            while b"\n" not in buf and len(buf) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            line = buf.split(b"\n", 1)[0]
+            try:
+                data = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return
+            msg = self._message_int(data.get("msg", 0))
+            wparam = self._message_int(data.get("w", 0))
+            lparam = self._message_int(data.get("l", 0))
+            if data.get("type") == "send":
+                result = self._dispatch_message(msg, wparam, lparam)
+                conn.sendall((json.dumps({"type": "reply",
+                                          "result": result}) + "\n").encode())
+            else:
+                self._message_queue.put((msg, wparam, lparam, 0))
+        except (OSError, ValueError) as exc:
+            self._log_once(f"IPC message failed: {exc}")
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _send_parent(self, payload: dict, expect_reply: bool = False):
+        """Send one JSON line to ``AHK_BRIDGE_IPC``; ``(ok, reply)``."""
+        path = os.environ.get("AHK_BRIDGE_IPC", "")
+        if not path or not os.path.exists(path):
+            return False, None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2.0)
+                sock.connect(path)
+                sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                if not expect_reply:
+                    return True, None
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                if not buf:
+                    return True, None
+                return True, json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            self._log_once(f"IPC send to parent failed: {exc}")
+            return False, None
+
+    def _shutdown_ipc(self):
+        self._ipc_stop.set()
+        sock, self._ipc_sock = self._ipc_sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        path, self._ipc_path = self._ipc_path, None
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        directory, self._ipc_dir = self._ipc_dir, None
+        if directory:
+            try:
+                os.rmdir(directory)
+            except OSError:
+                pass
+
+    # -- process bridge --
+    _URL_RE = re.compile(r"^(?:https?://|mailto:|discord:|roblox:)", re.I)
+
+    def _translate_command(self, command: str):
+        """Map an AHK Run target to (kind, target, args).
+
+        AutoHotkey invocations are rewritten to this bridge's CLI, including
+        Natro's `python /script x.ahk` shape (A_AhkPath is Python here).
+        """
+        text = str(command).strip()
+        if text.startswith("*RunAs"):
+            text = text[6:].strip()
+            self._log_once("Run: elevation option ignored on Linux")
+        if not text:
+            return None
+        if self._URL_RE.match(text):
+            return ("url", text.strip('"'), [])
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        if not tokens:
+            return None
+        switches = {"/script", "/restart", "/force", "/debug", "/errorstdout"}
+        ahk_index = next((i for i, tok in enumerate(tokens)
+                          if tok.lower().endswith(".ahk")), None)
+        if ahk_index is not None:
+            args = [tok for tok in tokens[ahk_index + 1:]
+                    if tok.lower() not in switches]
+            return ("ahk", self._abs_path(tokens[ahk_index]), args)
+        first = tokens[0]
+        first_low = os.path.basename(first).lower()
+        if (("autohotkey" in first_low or first_low.startswith("python"))
+                and any(tok.lower() in switches for tok in tokens[1:])):
+            # An AutoHotkey invocation with no .ahk argument cannot be run on
+            # Linux; spawning plain Python with `/restart` would be nonsense.
+            return ("ahk-noscript", text, [])
+        if first.lower().endswith((".bat", ".cmd", ".exe", ".com")):
+            return ("windows", first, tokens[1:])
+        return ("exec", tokens, [])
+
+    def _execute_run(self, raw_target, wait: bool = False):
+        try:
+            target = self._eval_expr(str(raw_target).strip())
+        except Exception:
+            target = str(raw_target).strip()
+        target = str(target).strip()
+        if not target:
+            self._log_once("Run: empty target ignored")
+            return 0
+        translated = self._translate_command(target)
+        if translated is None:
+            return 0
+        kind, path, args = translated
+        if kind == "ahk-noscript":
+            self._log_once("Run: AutoHotkey invocation without an .ahk script ignored")
+            return 0
+        if kind == "windows":
+            self._log_once(f"Run: Windows executable not supported on Linux: {path}")
+            return 0
+        if not self.allow_processes:
+            self._log_once(f"Run: process spawning disabled: {target}")
+            return 0
+        if kind == "url":
+            opener = shutil.which("xdg-open")
+            if not opener:
+                self._log_once("Run: xdg-open not found; URL ignored")
+                return 0
+            argv = [opener, path]
+        elif kind == "ahk":
+            if not os.path.isfile(path):
+                self._log_once(f"Run: script not found: {path}")
+                return 0
+            source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            argv = [sys.executable, "-m", "ahk_bridge.cli", "run", path]
+            if args:
+                argv += ["--", *args]
+        else:
+            argv = list(path)
+        return self._spawn(argv, wait=wait, target=target)
+
+    def _spawn(self, argv: list, wait: bool = False, target: str = ""):
+        env = os.environ.copy()
+        source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        current = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = source_root + (os.pathsep + current if current else "")
+        ipc = self._ensure_ipc()
+        if ipc:
+            env["AHK_BRIDGE_IPC"] = ipc
+        env["AHK_BRIDGE_PARENT_PID"] = str(os.getpid())
+        cwd = str(self.vars.get("A_WorkingDir") or os.getcwd())
+        if not os.path.isdir(cwd):
+            cwd = None
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+        except (OSError, ValueError) as exc:
+            self._log_once(f"Run failed ({target or argv[0]}): {exc}")
+            return 0
+        with self._process_lock:
+            self._children.append(proc)
+        if not wait:
+            return proc.pid
+        try:
+            while proc.poll() is None:
+                self._check()
+                self._process_due_timers()
+                self._drain_messages()
+                time.sleep(0.01)
+        except Aborted:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            raise
+        self._drain_messages()
+        return proc.returncode if proc.returncode is not None else 0
+
+    def _process_close(self, target) -> int:
+        try:
+            pid = int(str(target).strip())
+        except (TypeError, ValueError):
+            return 0
+        if pid <= 0:
+            return 0
+        with self._process_lock:
+            for proc in list(self._children):
+                if proc.pid != pid:
+                    continue
+                if proc.poll() is not None:
+                    return 1
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+                except OSError:
+                    return 0
+                return 1
+        if pid == os.getpid():
+            self.abort()
+            return 1
         return 0
 
     def expand_hotstring(self, trigger: str):
@@ -1175,6 +1454,11 @@ class Runtime:
             return self._register_message(c.args)
         if low in ("postmessage", "sendmessage"):
             return self._post_message(c.args, synchronous=low == "sendmessage")
+        if low in ("run", "runwait"):
+            raw = c.args[0] if c.args else ""
+            return self._execute_run(raw, wait=(low == "runwait"))
+        if low == "processclose" and c.args:
+            return self._process_close(self._eval_expr(c.args[0]))
         if low == "imagesearch":
             return self._image_search(c.args)
         if low in ("send", "sendinput", "sendevent", "sendplay", "sendtext") and c.args:
@@ -2240,6 +2524,16 @@ class Runtime:
         if low in ("postmessage", "sendmessage"):
             self._post_message(P._split_seq(rest),
                                synchronous=(low == "sendmessage"))
+            return
+        if low in ("run", "runwait"):
+            parts = [p.strip() for p in P._split_seq(rest)]
+            target = parts[0] if parts else ""
+            self._execute_run(target, wait=(low == "runwait"))
+            return
+        if low == "processclose":
+            parts = [p.strip() for p in P._split_seq(rest)]
+            target = self._eval_expr(parts[0]) if parts else ""
+            self._process_close(target)
             return
         if low == "suspend":
             self._set_suspend(rest)
