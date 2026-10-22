@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from ahk_bridge.backends.dry_backend import DryBackend
 from ahk_bridge.parser import parse_script
-from ahk_bridge.runtime import Runtime
+from ahk_bridge.runtime import Aborted, Runtime
 
 
 def run_text(text, **kw):
@@ -206,3 +208,49 @@ def test_cli_waits_for_pending_timer_and_honors_exit_after(tmp_path, capsys):
     started = time.monotonic()
     assert cmd_run(args) == 0
     assert time.monotonic() - started < 1.0
+
+
+def test_exitapp_function_runs_onexit_once_and_unwinds():
+    rt = Runtime(parse_script(
+        "calls := 0\n"
+        "OnExit(Handler)\n"
+        "ExitApp()\n"
+        "Handler(reason, code) {\n"
+        "    global calls\n"
+        "    calls += 1\n"
+        "}\n"
+    ), DryBackend())
+    with pytest.raises(Aborted) as info:
+        rt.run_auto()
+    assert info.value.exit_code == 0
+    assert rt.vars["calls"] == 1
+    assert rt._exit_done is True
+
+
+def test_exitapp_from_timer_unwinds_wait_and_runs_onexit():
+    rt = Runtime(parse_script(
+        "calls := 0\n"
+        "OnExit(Handler)\n"
+        "SetTimer Quit, -5\n"
+        "Quit() {\n"
+        "    ExitApp()\n"
+        "}\n"
+        "Handler(reason, code) {\n"
+        "    global calls\n"
+        "    calls += 1\n"
+        "}\n"
+    ), DryBackend())
+    rt.run_auto(exit_callbacks=False)
+    with pytest.raises(Aborted) as info:
+        rt.wait(timeout=1.0)
+    assert info.value.exit_code == 0
+    assert rt.vars["calls"] == 1
+
+
+def test_cli_exitapp_returns_requested_exit_code(tmp_path):
+    from ahk_bridge.cli import build_parser, cmd_run
+
+    script = tmp_path / "exit.ahk"
+    script.write_text("ExitApp(7)\n", encoding="utf-8")
+    args = build_parser().parse_args(["run", "--backend", "dry", str(script)])
+    assert cmd_run(args) == 7

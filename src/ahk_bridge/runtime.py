@@ -25,7 +25,9 @@ ABORT_KEYS = ("Escape", "Ctrl+Alt+C")
 
 
 class Aborted(RuntimeError):
-    pass
+    def __init__(self, message: str = "", exit_code=None):
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 class _Break(Exception):
@@ -424,6 +426,17 @@ class Runtime:
     @property
     def aborted(self):
         return self._abort.is_set()
+
+    def _exit_app(self, code=0):
+        """Implement ExitApp: run OnExit once, then unwind the runtime."""
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            code = 0
+        self.logs.append(f"ExitApp({code}) - clean end of script")
+        if self._run_exit_callbacks("Exit", code):
+            return 0
+        raise Aborted("ExitApp", code)
 
     def _check(self):
         if self._abort.is_set():
@@ -1239,10 +1252,13 @@ class Runtime:
         elif isinstance(st, P.Throw):
             raise RuntimeError(str(self._eval_expr(st.value)) if st.value else "throw")
         elif isinstance(st, P.ExitApp):
-            self.logs.append(f"ExitApp({st.code}) - clean end of script")
-            if self._run_exit_callbacks("Exit", st.code):
-                return
-            raise Aborted("ExitApp")
+            code = st.code
+            if isinstance(code, str):
+                try:
+                    code = self._eval_expr(code) if code.strip() else 0
+                except Exception:
+                    code = 0
+            self._exit_app(code)
         elif isinstance(st, P.LegacyCmd):
             self._legacy(st)
         elif isinstance(st, P.FuncDef):
@@ -1459,6 +1475,14 @@ class Runtime:
             return self._execute_run(raw, wait=(low == "runwait"))
         if low == "processclose" and c.args:
             return self._process_close(self._eval_expr(c.args[0]))
+        if low == "exitapp":
+            code = 0
+            if c.args:
+                try:
+                    code = int(self._eval_expr(c.args[0]))
+                except (TypeError, ValueError):
+                    code = 0
+            return self._exit_app(code)
         if low == "imagesearch":
             return self._image_search(c.args)
         if low in ("send", "sendinput", "sendevent", "sendplay", "sendtext") and c.args:

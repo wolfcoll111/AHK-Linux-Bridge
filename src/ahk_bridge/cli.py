@@ -8,7 +8,7 @@ import threading
 import time
 from .parser import parse_script
 from .includes import load_script
-from .runtime import Runtime
+from .runtime import Runtime, Aborted
 from .input_abstract import InputSimulator
 
 
@@ -75,6 +75,11 @@ def cmd_run(args) -> int:
         if isinstance(getattr(sim, "log", None), list):
             print(f"[backend={sim.backend_name} events={len(sim.log)}]")
         return 0
+    except Aborted as e:
+        if e.exit_code is not None:
+            return int(e.exit_code)
+        print(f"aborted: {e}", file=sys.stderr)
+        return 3
     except Exception as e:
         print(f"aborted: {e}", file=sys.stderr)
         return 3
