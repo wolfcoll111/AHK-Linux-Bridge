@@ -1801,17 +1801,41 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
             if lead in (",", "."):
                 # A statement can never START with `,`/`.` in AHK — always
                 # an argument-list / string-concat continuation.
-                out[-1] = out[-1] + " " + s
+                combined = out[-1] + " " + s
+                out[-1] = combined
+                paren = code.count("(") - code.count(")")
+                brack = code.count("[") - code.count("]")
+                if paren > 0 or brack > 0 or _open_ends(combined):
+                    buf = out.pop()
+                    buf_start = starts.pop()
                 continue
             if s.startswith(("&&", "||")):
                 # Leading-operator continuation (`&&`/`||` first): same rule.
-                out[-1] = out[-1] + " " + s
+                combined = out[-1] + " " + s
+                out[-1] = combined
+                paren = code.count("(") - code.count(")")
+                brack = code.count("[") - code.count("]")
+                if paren > 0 or brack > 0 or _open_ends(combined):
+                    buf = out.pop()
+                    buf_start = starts.pop()
                 continue
             if lead in ("(", "[") and _prev_open(out[-1]):
-                out[-1] = out[-1] + " " + s
+                combined = out[-1] + " " + s
+                out[-1] = combined
+                paren = code.count("(") - code.count(")")
+                brack = code.count("[") - code.count("]")
+                if paren > 0 or brack > 0 or _open_ends(combined):
+                    buf = out.pop()
+                    buf_start = starts.pop()
                 continue
             if lead == ":" and _colon_continues(out[-1], ln):
-                out[-1] = out[-1] + " " + s
+                combined = out[-1] + " " + s
+                out[-1] = combined
+                paren = code.count("(") - code.count(")")
+                brack = code.count("[") - code.count("]")
+                if paren > 0 or brack > 0 or _open_ends(combined):
+                    buf = out.pop()
+                    buf_start = starts.pop()
                 continue
         if paren > 0 or brack > 0 or _open_ends(s):
             buf = s

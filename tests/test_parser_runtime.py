@@ -87,6 +87,23 @@ def test_block_arrow_function_is_hoisted_for_includes():
     assert sc.functions["Bar"].body[0].value == "7"
 
 
+def test_leading_dot_continuation_tracks_open_parentheses():
+    # Natro's startup message has `. (cond ? "Enabled (" lang ")" : ...)`
+    # split across lines.  The leading `.` used to append the line without
+    # noticing the open paren, so the following `:` branch became a raw
+    # top-level statement and `Enabled (lang)` looked like a builtin call.
+    text = (
+        "flag := 1\n"
+        'msg := "head"\n'
+        '\t. (flag ? "Enabled (" flag ")"\n'
+        '\t\t: "Disabled")\n'
+        "Send msg\n"
+    )
+    sc, rt, sim = run(text)
+    rt.run_auto()
+    assert [e[1] for e in sim.log if e[0] == "type"] == ["headEnabled (1)"]
+
+
 def test_sleep_call_syntax_is_not_a_legacy_noop():
     # `Sleep(100)` is a function call in AHK v2.  The legacy-command regex
     # used to eat the parenthesized argument and the runtime logged a no-op,
