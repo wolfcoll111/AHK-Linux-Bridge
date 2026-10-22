@@ -1,14 +1,15 @@
-# HANDOFF — v0.5 → full capability (2026-10-21)
+# HANDOFF — v0.6 GUI → full capability (2026-10-22)
 
-Status: **v0.4 is complete and pushed.** Vision is no longer the bottleneck.
-The next job is to turn the engine from "language + eyes + input" into a
-runtime that can actually run NatroMacro end-to-end on Linux: builtins,
-timers, messages, submacro processes, GUI, window/OS bridge, then a live
-Natro proof.
+Status: **v0.5 (headless completeness) is complete and pushed.** The
+parser/include tree, builtins, timers, messages/IPC, submacro processes,
+OnExit/ExitApp and the census harness are in place; the Natro census has
+**zero unknown load-bearing hits**. The next job is the v0.6 GUI
+compatibility layer, then the v0.7 OS bridge, v0.8 end-to-end proof and
+v1.0 capability matrix.
 
 Repo: `/home/lordhats/Documents/Default Project/ahk-linux-bridge`
 Remote: `https://github.com/wolfcoll111/AHK-Linux-Bridge.git` (`main`;
-v0.4 code milestone `c3b6fd1`, handoff docs on top).
+v0.5 head `60147f2`, plus the ExitApp/OnExit and docs commits on top).
 Corpus (NOT in repo, stays on this PC): `~/Games/NatroMacro/src` — 150 ×
 `.ahk`, NatroMacro v1.1.2.
 Environment: KDE Plasma 6.7.5 / Wayland, uinput backend, KWin ScreenShot2,
@@ -21,30 +22,31 @@ This document is both the handoff and the paste-prompt (§8). Read
 
 ---
 
-## 1. Verified baseline (measured 2026-10-21)
+## 1. Verified baseline (measured 2026-10-22)
 
-- `python3 -m pytest -q` → **155 passed** (v0.4's 128 + include,
-  parser, census and regression tests).
-- Natro corpus: **150 files, 0 crashes, 593 functions, 22,125 nodes, 422
-  `__raw__` = 1.91%**. This is the post-dangling-else-fix recount; the old
-  handoff numbers (524 / 22,176 / 380) were measured before the parser
-  correction and are superseded. The raw nodes remain help-text prose,
-  Gdip machine-code blobs, memory/DllCall stubs, and join fragments. **Do
-  not chase them** unless a census shows one on a load-bearing path.
-- Stub census baseline (`docs/CENSUS-v0.5.md`, generated 2026-10-21):
-  **150/150 scripts executed**, 0 timeouts, 1 worker-budget stop
-  (`StatMonitor.ahk`, partial inventory), **10 unknown load-bearing
-  hits**: `IniRead`, `DateDiff`, `OnExit`, no-arg `OSError`, `SplitPath`,
-  `String`, `Number`, `ImageSearch`, and the parser misread of
-  `Sleep(...)` as a legacy command. Known language gaps (assign targets,
-  `for-in`, parser function-body leakage) are reported separately and are
-  the next work queue.
+- `python3 -m pytest -q` → **211 passed** (~6.7 s), including the event
+  loop, process/IPC bridge, include/parser, census and builtin regressions.
+- Natro corpus: **150 files, 0 crashes, 591 functions, 23,501 nodes, 410
+  `__raw__` = 1.74%**. The raw nodes remain help-text prose, Gdip
+  machine-code blobs, memory/DllCall stubs, and join fragments. **Do not
+  chase them** unless a census shows one on a load-bearing path.
+- Stub census (`docs/CENSUS-v0.5.md`, generated 2026-10-22):
+  **150/150 scripts executed**, 0 timeouts, 0 worker-budget stops,
+  **0 unknown load-bearing hits**. Remaining known gaps: 12 windows-only,
+  11 language-gap, 8 setting-noop, 5 cross-file, 1 parser-raw. The
+  language gaps are mostly collection/member shapes (`bitmaps[...]` with
+  no live container, `.has()`); they are the next non-GUI work queue.
+- Natro's startup `OnMessage` block registers all **12** handlers
+  (`0x20`, `0x4A`, `0x5550`–`0x5553`, `0x5555`–`0x5560`) under the real
+  expanded main script. Dispatching `0x5551` reaches `nm_setShiftLock`
+  without a crash (it returns early while `WinExist` is falsy).
 - `python3 -m ahk_bridge.cli check` → `detected_backend: uinput`,
   `/dev/uinput` writable, `session_type: wayland`.
-- Live capture: `pixels.screenshot_rgb((0,0,32,32))` returns `(32, 32)`,
-  non-black; `pixels.screen_size()` → `(0, 0, 1920, 1080)`. mss reads the
-  XWayland root black on this session; KWin `org.kde.KWin.ScreenShot2` is
-  the live path. Keep mss as the X11 fallback.
+- Live capture (measured 2026-10-21, unchanged code path):
+  `pixels.screenshot_rgb((0,0,32,32))` returns `(32, 32)`, non-black;
+  `pixels.screen_size()` → `(0, 0, 1920, 1080)`. mss reads the XWayland
+  root black on this session; KWin `org.kde.KWin.ScreenShot2` is the live
+  path. Keep mss as the X11 fallback.
 - Live vision proof (2026-10-21): Natro's `royaljelly.png` (108×28) at
   screen `(400,300)`; real runtime returned count **1**, list `100,100`
   (global `400,300`). Logs:
@@ -57,54 +59,50 @@ This document is both the handoff and the paste-prompt (§8). Read
 - Real `Gdip_BitmapFromScreen` call sites: **127** (129 textual
   occurrences include the library definition and one commented contract
   line). All 127 argument expressions evaluate to region-shaped values.
-- Main `natro_macro.ahk` parsed **without includes**: 1,072 auto-section
-  statements, 249 functions, 33 `Include` nodes. Those includes are the
-  missing libs, helpers and bitmap tables.
+- Expanded main `natro_macro.ahk`: **35 include files**, 23,392 logical
+  lines, 1,743 auto statements, 633 functions, expand/parse **0.45 s /
+  1.81 s**, 60 raw nodes in the auto-section (help text / join fragments).
 
 ### What is already done
 
 - Parser + runtime: control flow, functions/classes, expressions, ternary,
-  implicit concatenation, regex, arrays/maps, file/INI basics, try/catch.
+  implicit concatenation, regex, arrays/maps, file/INI basics, try/catch,
+  dotted concat with top-level operator splitting.
+- `#Include` loader: textual expansion, per-file bases, once/again,
+  `%A_ScriptDir%`, backslashes, `*i`, cycles, includes inside functions;
+  the real main script expands to 35 files with its bitmaps/libs.
+- Built-in variables and CLI `A_Args`; real `SetWorkingDir`; minimal
+  `A_TrayMenu`; string/collection/file/INI/date/type builtins; native
+  `ImageSearch`; `OnError`; `OnExit`; real `ExitApp` exit codes.
+- Timers (positive recurring, negative one-shot, `0` off), dynamic
+  `Hotkey`, `Suspend`/`Pause`/`GetKeyState`, `OnMessage` registry,
+  `PostMessage`/`SendMessage`, Unix-domain-socket IPC between parent and
+  `Run`-spawned children, `Run`/`RunWait`, `ProcessClose`, and
+  `Runtime.wait()`/CLI `--wait`/`--exit-after`.
 - Vision: bitmap handles, base64, screen capture, image search (variation,
   trans, 8 directions, instances, delimiters, AHK error codes).
 - Input: uinput (Wayland) + XTest (X11) + dry backend; live F13 proof;
   window activation on the supported paths.
 - Live capture: KWin ScreenShot2 on Wayland; mss fallback.
+- Census harness: sandboxed static + runtime inventory, `allow_processes`
+  guard, load-bearing triage, JSON/Markdown report.
 
 ### What is still missing (load-bearing)
 
-0. **`#Include` resolution** — the parser only logs directives. Natro has
-   **104** `#Include` lines (33 in the main auto-section), including
-   directory-as-include-base (`#Include "%A_ScriptDir%\..\lib"`),
-   `%A_ScriptDir%`, unquoted/backslash paths, and include lines inside
-   functions. Until includes are expanded, the main script is missing its
-   lib functions, JSON/Roblox helpers, and ~2 MB of
-   `bitmaps[...] := Gdip_BitmapFromBase64(...)` tables. This blocks the
-   census and end-to-end running; do it first.
-1. **Built-in variables** — no `A_*` initialization at all. Corpus uses
-   `A_Index` 934, `A_LoopField` 88, `A_PtrSize` 74, `A_WorkingDir` 62,
-   `A_Args` 57, `A_ScriptDir` 48, `A_Now`/`A_NowUTC`/time parts, `A_TrayMenu`
-   20, `A_Clipboard` 14, `A_ScreenWidth/Height/DPI`, `A_KeyDelay`, etc.
-2. **Pure builtins** — partial only. Missing/high-use examples:
-   `StrGet`/`StrPut`, `Buffer`, `NumGet`/`NumPut`, `FileOpen`, `FileExist`
-   (currently always falsy), `FormatTime`, `DateAdd/Diff`, collection
-   methods, `ComObject`/`ComCall`, `OnMessage`, `SetTimer` (currently a
-   logged no-op), `Hotkey`, `Run`/`RunWait` (logged no-op), `ProcessClose`,
-   clipboard, tray.
-3. **Timers / messages / multi-process** — `SetTimer` and `OnMessage` are
-   stubs; `PostMessage`/`SendMessage` are legacy no-ops. Natro's main script
-   and its submacros (`Status`, `PlanterTimers`, `background`) talk over
-   Windows messages (`0x5550`–`0x5560`). Without this, the app cannot run.
-4. **GUI** — `Gui`, `GuiCtrl`, `MainGui.Add`, `OnEvent`, `Hwnd`, `SetFont`,
-   `Value`, etc. are stubs. This is the last load-bearing AHK surface and is
-   a toolkit project, not a bugfix.
-5. **Window/OS bridge** — `WinGetPos`, `WinGetClientPos`, `WinClose`,
-   `WinMove`, `WinSetTransparent`, `ControlGet*`, `Run`, clipboard,
-   `DllCall` whitelist, COM/WinHttp, memory model. Some are display-only;
-   the census must separate them.
-6. **Natro end-to-end proof** — not attempted. Parsing and isolated logic
-   are proven; the app has never started with its GUI, timers, submacros and
-   main loop.
+0. **GUI** — `Gui`, `GuiCtrl`, `MainGui.Add`, `OnEvent`, `Hwnd`, `SetFont`,
+   `Value`, etc. are stubs. This is the last large AHK surface and the v0.6
+   milestone.
+1. **Window/OS bridge** — `WinGetPos`, `WinGetClientPos`, `WinClose`,
+   `WinMove`, `WinSetTransparent`, `ControlGet*`, clipboard, `DllCall`
+   whitelist, COM/WinHttp, and a bounds-checked memory model. Some are
+   display-only; the census must separate them.
+2. **Language gaps still visible in census** — 830 `bitmaps[...]`
+   assign-target hits with no live container, 20 `.has()` method hits, and
+   a handful of `buff_*`/`Shrine[...]` containers. These do not prevent
+   loading, but they must resolve before State/GUI handlers use them.
+3. **Natro end-to-end proof** — not attempted. Parsing, isolated logic and
+   the message/timer/process surface are proven; the app has never started
+   with its GUI, timers, submacros and main loop on this box.
 
 ---
 
@@ -115,7 +113,7 @@ surface**, not "all of Windows". A complete Windows emulator is out of
 scope. Fully capable means:
 
 1. All 150 Natro scripts parse with 0 crashes (the main script with its
-   `#Include` tree expanded); the raw count is not worse than 380, and no
+   `#Include` tree expanded); the raw count is not worse than 410, and no
    raw is load-bearing by census.
 2. The engine starts Natro's real `natro_macro.ahk` with its GUI, config,
    timers, hotkeys, submacros and main loop on this Linux box.
@@ -141,18 +139,18 @@ extension done because the unit tests pass.
 
 | Area | Status | Notes |
 |---|---|---|
-| Parser / AST | Supported | 22,176 nodes, 0 crashes, 380 prose/Gdip raws |
-| `#Include` loader | Gap | 104 directives logged, not expanded; blocks the app |
+| Parser / AST | Supported | 23,501 nodes, 0 crashes, 410 prose/Gdip raws |
+| `#Include` loader | Supported | 35 files expanded; tests for bases/once/again/cycles |
 | Core language | Supported | loops, if/else, switch, try, functions, classes |
-| Expressions | Supported | arithmetic, ternary, concat, regex, arrays/maps |
-| `A_*` variables | Gap | not initialized |
-| Pure builtins | Partial | string/math basics only; see census |
-| File / INI | Partial | INI read/write real; most file commands stubs |
-| Timers / hotkeys | Gap | `SetTimer`, `Hotkey` no-ops |
-| Messages / IPC | Gap | `OnMessage` stub, `PostMessage` no-op |
-| Submacro processes | Gap | `Run` no-op |
-| GUI | Gap | `Gui`/`GuiCtrl`/`OnEvent` stubs |
-| Window / process ops | Partial | `WinActivate` works on supported paths |
+| Expressions | Supported | arithmetic, ternary, top-level `.` concat, regex, arrays/maps |
+| `A_*` variables | Supported | paths/time/screen/process/input; `A_Args`; `A_TrayMenu` |
+| Pure builtins | Supported | string/collection/file/INI/date/type/env; display-only GUI builtins remain stubs |
+| File / INI | Supported | read/write, loop-files, INI; Windows-only file attrs are documented |
+| Timers / hotkeys | Supported | recurring/one-shot/off, dynamic Hotkey, suspend/pause |
+| Messages / IPC | Supported | OnMessage, local Post/Send, Unix-socket parent/child transport |
+| Submacro processes | Supported | Run/RunWait, child tracking, ProcessClose, ExitApp codes |
+| GUI | Gap | `Gui`/`GuiCtrl`/`OnEvent` stubs; v0.6 |
+| Window / process ops | Partial | `WinActivate`; window geometry/control ops are stubs |
 | Clipboard | Gap | `A_Clipboard`, `ClipWait` stubs |
 | Vision / capture | Supported | KWin + mss, live-proven |
 | Input | Supported | uinput + XTest, live-proven |
@@ -176,13 +174,13 @@ extension done because the unit tests pass.
 - **No hype.** Report measured numbers. If a surface is impossible on
   Linux, say so and give the verdict. Do not call the extension "working"
   because parsing passes.
-- **Do not regress v0.4.** Keep the 128+ tests green, keep the Natro corpus
+- **Do not regress v0.5.** Keep the 211+ tests green, keep the Natro corpus
   at 0 crashes, keep the live capture path working.
 - **Dependencies.** numpy is already justified and in the `pixels` extra.
   Any new dependency (GUI toolkit, clipboard helper, etc.) needs measured
   before/after numbers, install size, and a reason in the commit message.
   No OpenCV unless measurements force it.
-- **Do not chase the 380 raws.** They are described in §1. Revisit only if
+- **Do not chase the 410 raws.** They are described in §1. Revisit only if
   the census proves one is reached by the main loop.
 - **Do not port Gdip_All.ahk's DllCall code.** The native vision layer
   replaces it. Implement only the DllCall signatures that the census shows
@@ -383,16 +381,21 @@ This is the part that turns the engine into an app:
   12 handlers; a simulated `nm_setShiftLock` path runs; `OnExit` fires once
   on `ExitApp`.
 
-#### 5.4 — v0.5 acceptance
+#### 5.4 — v0.5 acceptance (met 2026-10-22)
 
 - `natro_macro.ahk` loads with its full include tree; the lib functions and
   bitmap globals are present; include tests pass.
 - Census report shows zero unknown **load-bearing** pure builtins/commands;
   every remaining stub is in the documented display-only/external class.
-- Full test suite green; new tests cover each group and fail without the
-  fix.
-- Corpus still has 0 crashes; the post-fix baseline is 593 funcs / 22,125
-  nodes / 422 raw (see §1; the expanded main script is counted separately).
+- Full test suite green (**211 passed**); new tests cover each group and
+  fail without the fix.
+- Corpus still has 0 crashes; the post-fix baseline is **591 funcs /
+  23,501 nodes / 410 raw (1.74%)** (see §1; the expanded main script is
+  counted separately).
+- Natro's 12 startup `OnMessage` handlers register under the expanded
+  script, and a simulated `0x5551` dispatch reaches `nm_setShiftLock`.
+- `OnExit` runs exactly once on `ExitApp`; `ExitApp(n)` returns exit code
+  `n`; a parent `RunWait` child can post a custom message back over IPC.
 - Commit + push; update this doc's baseline and census numbers.
 
 ### v0.6 — GUI compatibility layer
@@ -595,7 +598,7 @@ object used by `lib/Discord.ahk` (`wr.Open`, `wr.Send`, `wr.WaitForResponse`,
 
 ### 5.5 Do not chase
 
-- The 380 `__raw__`: help-text prose, Gdip machine-code data blobs,
+- The 410 `__raw__`: help-text prose, Gdip machine-code data blobs,
   multi-line `NumPut(`/`DllCall(` memory pokes, stray braces, 2–3 join
   fragments. They have no execution value unless the census proves a
   load-bearing hit.
@@ -630,7 +633,7 @@ Corpus recount: reuse the snippet in `HANDOFF-v03-natro.md` §5 (it walks
 `auto_section`, function bodies, `cases`, `Seq`, `Try.else_body`). Expected:
 
 ```text
-files=150 funcs=524 nodes=22176 raw=380 (1.71%) crashes=0
+files=150 funcs=591 nodes=23501 raw=410 (1.74%) crashes=0
 ```
 
 Include-gap baseline (main script, unexpanded):
@@ -711,13 +714,12 @@ blocker or a product decision requires the user.
 VERIFY FIRST (before editing):
   cd "/home/lordhats/Documents/Default Project/ahk-linux-bridge"
   git status --short                  # must be clean
-  python3 -m pytest -q                # must be 128 passed
+  python3 -m pytest -q                # must be 211 passed
   python3 -m ahk_bridge.cli check     # must detect uinput
   python3 -c "from ahk_bridge import pixels as px; r,w,h=px.screenshot_rgb((0,0,32,32)); print((w,h), any(r), px.screen_size())"
   # must print (32, 32) True (0, 0, 1920, 1080)
-  # corpus recount: 150 files / 524 funcs / 22176 nodes / 380 raw (1.71%) / 0 crashes
-  # known blocker: #Include is logged only; 104 directives / 33 in the
-  # main auto-section, so natro_macro.ahk is missing all libs and bitmaps.
+  # corpus recount: 150 files / 591 funcs / 23501 nodes / 410 raw (1.74%) / 0 crashes
+  # census: 150 executed / 0 timeouts / 0 errors / 0 unknown load-bearing
 If any baseline is different, investigate before changing code. The live
 vision logs are /tmp/opencode/vision-live-proof.log and
 /tmp/opencode/vision-live-proof-phase3.log (count 1, list 100,100).
@@ -738,22 +740,9 @@ DEFINITION OF FULLY CAPABLE (scoped to the Natro corpus, not all Windows):
    evidence and reason.
 
 ROADMAP (full detail in HANDOFF-v05-full-capability.md):
-- v0.5 headless completeness: FIRST implement the #Include loader (104
-  directives; textual expansion, per-file relative/dir base, once/again,
-  %A_ScriptDir%, backslashes, cycles, includes inside functions, huge bitmap
-  assignments; directives can be indented and appear inside functions, so
-  do NOT use a column-0 heuristic; do NOT expand #Include text inside
-  continuation strings, e.g. Natro's generated-script blocks). THEN build
-  tools/natro_census.py (static + DryBackend
-  runtime stub hits + load-bearing triage; sandbox it with a temp cwd and no
-  WinActivate/capture/Run/file writes), then A_* variables and CLI A_Args,
-  pure builtins (strings/collections/file/INI/time/env), real SetTimer,
-  Hotkey, OnMessage/PostMessage/SendMessage, OnExit/ExitApp, callback
-  references + `(*) => ...` arrows, Run/RunWait submacro processes, and a
-  runtime wait/event loop. Acceptance: natro_macro.ahk loads with its full
-  include tree; no unknown load-bearing pure builtins; a parent/child AHK
-  message test; timer test; Natro's 12 OnMessage handlers register; corpus
-  unchanged.
+- v0.5 headless completeness: **DONE** (include loader, census, A_* vars,
+  builtins, timers/hotkeys, OnMessage/IPC, Run/RunWait, OnExit/ExitApp,
+  event loop; census has 0 unknown load-bearing hits).
 - v0.6 GUI: write docs/GUI-DECISION.md with measured toolkit comparison
   (PySide6 is installed; Tk is not; PyGObject is importable; webview not).
   Then implement a Gui/GuiCtrl compatibility layer: Add, SetFont, Show/Hide/
@@ -796,14 +785,16 @@ RULES: no hype; verify by execution (oracles, logs, live proofs), not
 assertion. One feature per commit with a regression test that fails without
 it; commit+push every green step; update the handoff numbers when they move.
 No silent stubs: log once and return AHK-falsy. Do not regress vision/input/
-capture. Do not chase the 380 prose/Gdip __raw__ or port Gdip_All.ahk's
+capture. Do not chase the 410 prose/Gdip __raw__ or port Gdip_All.ahk's
 DllCall code. New deps need measured before/after numbers and install-size
 justification. Keep the test suite fast (no live desktop calls in unit
 tests). If a load-bearing surface is genuinely impossible on Linux, stop and
 report the exact blocker + workaround; do not fake it.
 
-START NOW: baseline verification, then implement the #Include loader with
-tests and commit it, then build the census harness and commit it before
-touching builtins. Work through v0.5 and continue into v0.6, v0.7, v0.8 and
-v1.0 in order until the capability matrix is complete.
+START NOW: baseline verification, then begin v0.6. First write
+docs/GUI-DECISION.md with the measured PySide6/Tk/PyGObject/webview
+comparison and install sizes, then implement the Gui/GuiCtrl/OnEvent layer
+with headless offscreen tests. After a green commit, re-run the census and
+continue into v0.7, v0.8 and v1.0 in order until the capability matrix is
+complete.
 ```
