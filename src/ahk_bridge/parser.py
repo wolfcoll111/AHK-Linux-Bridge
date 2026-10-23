@@ -1191,12 +1191,33 @@ def _parse_switch(lines: list[str], i: int, value: str):
         code = _strip_comment(raw).strip()
         mc = CASE_RE.match(code)
         md = DEFAULT_RE.match(code)
+        # AHK permits the case body on the label line:
+        #   Case 1: Send "one"
+        # CASE_RE only matches a label ending in `:`, so split the top-level
+        # colon ourselves.  Natro's HashFile uses this compact form.
+        inline_body = None
+        if not (mc or md) and re.match(r'(?i)^(case|default)\b', code):
+            parts = _split_top(code, ":")
+            if len(parts) >= 2 and ":".join(parts[1:]).strip():
+                head = parts[0].strip()
+                inline_body = ":".join(parts[1:]).strip()
+                mci = re.match(r'(?i)^case\s+(.+)$', head)
+                if mci:
+                    mc = mci
+                elif re.match(r'(?i)^default$', head):
+                    md = re.match(r'(?i)^default$', head)
+                else:
+                    inline_body = None
         if mc or md:
             if started:
                 cases.append((cur_cond, cur_body))
             cur_cond = mc.group(1).strip() if mc else None
             cur_body = []
             started = True
+            if inline_body:
+                sub = parse_statement(inline_body)
+                if sub is not None:
+                    cur_body.append(sub)
             i += 1
             continue
         # nested structures inside case bodies: reuse statement parsing by
@@ -1264,6 +1285,29 @@ def _parse_case_statement(lines: list[str], i: int):
                     _seg = _seg.rstrip("?*").strip()
                     if _seg.split():
                         _params.append(_seg.split()[0])
+                # `Name() => { key: value, ... }` is an arrow returning an
+                # object literal, not a block body.  HashFile uses this for
+                # its synthetic HCRYPTPROV/HCRYPTHASH handles.  A block body
+                # starts with a statement (`x := 1`, `if ...`, `return ...`),
+                # while an object literal's first item is `key:`.
+                _obj_lines = []
+                _k = _body_at
+                _obj_close = None
+                while _k < len(lines):
+                    _ln = _strip_comment(lines[_k]).strip()
+                    if _ln == "}":
+                        _obj_close = _k
+                        break
+                    if _ln:
+                        _obj_lines.append(_ln)
+                    _k += 1
+                _first = _obj_lines[0] if _obj_lines else ""
+                _looks_obj = bool(re.match(r'^[A-Za-z_]\w*\s*:', _first)) and not re.match(
+                    r'(?i)^(if|else|loop|for|while|switch|try|return|throw|break|continue|static|global|local)\b',
+                    _first)
+                if _obj_close is not None and _looks_obj:
+                    return FuncDef(_aname, _params,
+                                   [Return("{" + " ".join(_obj_lines) + "}")]), _obj_close + 1
                 _body, _ni, _ = _parse_block(lines, _body_at)
                 return FuncDef(_aname, _params, _body), _ni
     mc = CLASS_RE.match(code)
