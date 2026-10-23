@@ -1,5 +1,8 @@
 # HANDOFF — v0.6 GUI → full capability (2026-10-22)
 
+> Historical: v0.6 is complete. See `HANDOFF-v06-gui.md` for the current
+> status, measurements and next-session prompt.
+
 Status: **v0.5 (headless completeness) is complete and pushed.** The
 parser/include tree, builtins, timers, messages/IPC, submacro processes,
 OnExit/ExitApp and the census harness are in place; the Natro census has
