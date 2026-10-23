@@ -160,6 +160,27 @@ def test_win_move_and_opacity_are_real_gui_operations():
         _close_guis(rt)
 
 
+def test_legacy_controlgetpos_omitted_first_output_slot():
+    """Empirically matches AHK v2: space before the command comma omits X."""
+    pytest.importorskip("PySide6")
+    rt = run(
+        'MainGui := Gui("", "LegacyControl")\n'
+        'MainGui.Show("w300 h200")\n'
+        'ctrl := MainGui.Add("Button", "x7 y8 w60 h20", "B")\n'
+        'ctrl_x := ctrl_y := ctrl_w := ctrl_h := -1\n'
+        'ControlGetPos , &ctrl_y, , &ctrl_h, ctrl\n'
+    )
+    try:
+        rt.run_auto()
+        # Only Y and H were requested; X and W must stay untouched.
+        assert rt.vars["ctrl_y"] == 8
+        assert rt.vars["ctrl_h"] == 20
+        assert rt.vars["ctrl_x"] == -1
+        assert rt.vars["ctrl_w"] == -1
+    finally:
+        _close_guis(rt)
+
+
 def test_legacy_transparency_accepts_gui_object():
     pytest.importorskip("PySide6")
     rt = run(

@@ -2231,9 +2231,12 @@ class Runtime:
         self._win_activate(str(value or ""))
         return 1
 
-    def _legacy_window(self, low: str, rest: str) -> bool:
+    def _legacy_window(self, low: str, rest: str,
+                       omitted_first: bool = False) -> bool:
         parts = [p.strip() for p in P._split_seq(rest)]
-        if parts and parts[0] == "":
+        if low == "controlgetpos" and omitted_first:
+            parts = [""] + parts
+        elif parts and parts[0] == "":
             parts = parts[1:]
         if low == "wingetpos":
             self._win_get_pos(parts, client=False)
@@ -3592,7 +3595,8 @@ class Runtime:
         if low in ("wingetpos", "wingetclientpos", "wingettitle",
                    "winclose", "winkill", "winmove", "winsettransparent",
                    "controlgetpos", "controlgettext"):
-            if self._legacy_window(low, rest):
+            if self._legacy_window(low, rest,
+                                   getattr(st, "omitted_first", False)):
                 return
         if low == "splitpath":
             parts = [p.strip() for p in P._split_seq(rest)]

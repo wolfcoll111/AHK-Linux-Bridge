@@ -210,6 +210,9 @@ class ExitApp:
 class LegacyCmd:
     name: str
     rest: str = ""
+    # `ControlGetPos , &y, , &h, ctrl` omits the first output (X); the
+    # space before the command comma is significant in AHK command syntax.
+    omitted_first: bool = False
 
 
 @dataclass
@@ -930,7 +933,9 @@ def parse_statement(line: str):
         # `SplitPath(path, &dir)` must reach the function/builtin path, not
         # become a no-op LegacyCmd with parenthesized text.
         if not m.group(2).lstrip().startswith("("):
-            return LegacyCmd(m.group(1), m.group(2).strip())
+            omitted = bool(re.match(r"^\s*ControlGetPos\s+,",
+                                    s, re.IGNORECASE))
+            return LegacyCmd(m.group(1), m.group(2).strip(), omitted)
     # short-circuit statement forms: A && B / A || B, incl. N-ary chains
     # (`IsSet(x) && ok && cleanup()` runs cleanup only if all hold).
     # Skipped when the head is an assignment: `x := a && b` assigns the
