@@ -420,6 +420,10 @@ def run_runtime_census(root: Path, files: list[Path], max_loop: int,
     env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"]
                                     if env.get("PYTHONPATH") else "")
     env["AHK_BRIDGE_CENSUS"] = "1"
+    # GUI-capable corpus files must never create or touch real windows while
+    # the census runs.  Force Qt's offscreen backend in every child.
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QT_LOGGING_RULES"] = "qt.qpa.*=false"
     for index, path in enumerate(files, 1):
         rel = path.relative_to(root)
         sandbox_file = sandbox / "src" / rel

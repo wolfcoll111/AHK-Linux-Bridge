@@ -195,3 +195,95 @@ def test_dot_concat_enabled_branch_keeps_unbalanced_paren_in_string():
     )
     rt.run_auto()
     assert ("type", "**\\nEnabled (en-)") in [(e[0], e[1]) for e in sim.log]
+
+
+def test_click_prefix_identifier_is_an_assignment_not_a_command():
+    # `clicked := 1` used to match the bare `Click` command before the
+    # assignment parser and silently became a mouse click.
+    from ahk_bridge.parser import Assign, parse_statement
+
+    assert isinstance(parse_statement("clicked := 1"), Assign)
+    sc, rt, sim = run("clicked := 1\nresult := clicked\n")
+    rt.run_auto()
+    assert rt.vars["result"] == 1
+
+
+def test_empty_gui_control_positional_args_are_preserved():
+    from ahk_bridge.parser import FuncCall, parse_statement
+
+    node = parse_statement('ctrl.Move(, , 85)')
+    assert isinstance(node, FuncCall)
+    assert node.args == ["", "", "85"]
+    node = parse_statement('gui.Add("Text", , "hello")')
+    assert isinstance(node, FuncCall)
+    assert node.args == ['"Text"', "", '"hello"']
+
+
+def test_gui_chained_call_keeps_each_links_arguments():
+    from ahk_bridge.parser import ExprStmt, parse_statement
+
+    node = parse_statement('btn := gui.Add("Button", "x5", "Start").OnEvent("Click", fn)')
+    assert type(node).__name__ == "Assign"
+    assert isinstance(parse_statement(
+        'gui.Add("Button", "x5", "Start").OnEvent("Click", fn)'), ExprStmt)
+
+
+def test_complex_assignment_target_parses_as_expression_statement():
+    from ahk_bridge.parser import ExprStmt, parse_statement
+
+    for text in (
+        '(ctrl := gui.Add("Text", "x5")).Section := "Gather"',
+        'gui.Add("Text", "x5").Text := "changed"',
+        'gui["Control"].Value := 1',
+        '%ctrl.Name% := "dynamic"',
+    ):
+        assert isinstance(parse_statement(text), ExprStmt), text
+
+
+def test_nested_object_array_literals_keep_braces_together():
+    # `_split_seq` must count {...} as nesting, otherwise an array of
+    # objects becomes bogus `[ {..}` index reads (Natro's slotMove table).
+    sc, rt, sim = run(
+        'slotMove := [ [{dir:"Right", dist:4}, '
+        '{dir:["Right", "Fwd"], dist:20}] ]\n'
+    )
+    rt.run_auto()
+    assert rt.vars["slotMove"] == [[
+        {"dir": "Right", "dist": 4},
+        {"dir": ["Right", "Fwd"], "dist": 20},
+    ]]
+
+
+def test_global_declaration_initializer_is_applied():
+    # `global Name := value` used to drop the initializer; Natro's
+    # nm_importFieldDefaults relies on it.
+    from ahk_bridge.parser import ScopeDecl, parse_statement
+
+    node = parse_statement("global FieldDefault := Map()")
+    assert isinstance(node, ScopeDecl)
+    assert node.names == ["FieldDefault"]
+    assert node.initializers == [("FieldDefault", "Map()")]
+    sc, rt, sim = run(
+        'Init() {\n'
+        '    global FieldDefault := Map("Sunflower", Map("pattern", "X"))\n'
+        '    global FieldName1 := "Sunflower"\n'
+        '}\n'
+        'Init()\n'
+        'result := FieldDefault[FieldName1]["pattern"]\n'
+    )
+    rt.run_auto()
+    assert rt.vars["result"] == "X"
+
+
+def test_condition_logical_operators_short_circuit():
+    # `&&` must not evaluate the right-hand side when the left is false;
+    # Natro does `A_Args.Has(1) && A_Args[1]` with an empty A_Args.
+    sc, rt, sim = run(
+        'if (A_Args.Has(1) && (A_Args[1] = 1)) {\n'
+        '    result := "then"\n'
+        '} else {\n'
+        '    result := "else"\n'
+        '}\n'
+    )
+    rt.run_auto()
+    assert rt.vars["result"] == "else"

@@ -133,6 +133,8 @@ class Return:
 class ScopeDecl:
     kind: str  # global | static | local
     names: list = field(default_factory=list)
+    # `global Name := value` declares and initializes in one statement.
+    initializers: list = field(default_factory=list)  # [(name, raw_expr)]
 
 
 @dataclass
@@ -441,6 +443,24 @@ def _is_bare_index_read(s: str) -> bool:
     return s[k:].strip() == ""
 
 
+_EMPTY_ARG_METHODS = {
+    "add", "move", "getpos", "opt", "setfont", "show", "onevent", "usetab",
+}
+
+
+def _keep_empty_args(name: str) -> bool:
+    """True for APIs whose positional slots are meaningful when omitted.
+
+    `GuiCtrl.Move(, , 85)` means "keep x/y, set width=85"; dropping the two
+    leading empties would silently move the control to x=85. Gdip_* and
+    SplitPath already needed this, and the AHK Gui/control API does too.
+    """
+    low = (name or "").lower()
+    if low.startswith("gdip_") or low in ("splitpath", "gui"):
+        return True
+    return low.rsplit(".", 1)[-1] in _EMPTY_ARG_METHODS
+
+
 def _match_call(s: str):
     """Match `Name(args)` / `Obj.Method(args)` with balanced parens.
     Returns (name, argstr, rest) or None. Trailing `.Method(...)` chains are
@@ -593,10 +613,10 @@ def _split_seq(s: str) -> list:
         elif ch in ('"', "'"):
             q = ch
             cur += ch
-        elif ch in "([":
+        elif ch in "([{":
             depth += 1
             cur += ch
-        elif ch in ")]":
+        elif ch in ")]}":
             depth = max(0, depth - 1)
             cur += ch
         elif ch == "," and depth == 0:
@@ -747,7 +767,7 @@ def parse_statement(line: str):
         if nums and button in rest.lower():
             pass
         return Click(x, y, button, count)
-    m = re.match(r'(?i)^click\s*(.*)$', s)
+    m = re.match(r'(?i)^click\b\s*(.*)$', s)
     if m:
         rest = m.group(1).strip()
         x = y = None
@@ -824,9 +844,30 @@ def parse_statement(line: str):
         return Return(val if val else None)
     m = DECL_RE.match(s)
     if m:
-        names = [p.strip().lstrip("&").split(":=")[0].split("=")[0].strip()
-                 for p in m.group(2).split(",") if p.strip()]
-        return ScopeDecl(m.group(1).lower(), [x for x in names if x])
+        names, inits = [], []
+        for part in _split_seq(m.group(2)):
+            part = part.strip()
+            if not part:
+                continue
+            assign = _split_top(part, ":=")
+            if len(assign) == 2:
+                name, value = assign[0].strip().lstrip("&"), assign[1].strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    names.append(name)
+                    inits.append((name, value))
+                    continue
+            # legacy `global x = 1` (but not `==` comparisons)
+            eq = _split_top(part, "=")
+            if len(eq) == 2 and "=" not in eq[1] and "!" not in eq[0]:
+                name, value = eq[0].strip().lstrip("&"), eq[1].strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    names.append(name)
+                    inits.append((name, value))
+                    continue
+            name = part.lstrip("&").split(":=")[0].split("=")[0].strip()
+            if name:
+                names.append(name)
+        return ScopeDecl(m.group(1).lower(), names, inits)
     m = re.match(r'(?i)^iniwrite\s+(.*)$', s)
     if m:
         # _split_seq (not _parse_args): keeps quotes so runtime evals values
@@ -944,16 +985,33 @@ def parse_statement(line: str):
     # following try-`else` takes the same path as AHK's no-throw case).
     if re.match(r"^[A-Za-z_]\w*\[", s) and _is_bare_index_read(s):
         return ExprStmt(s.strip())
+    # Parenthesized expression with a trailing property/method access:
+    # `(GuiCtrl := MainGui.Add(...)).OnEvent("Click", fn)` and
+    # `(GuiCtrl := ...).Section := "Gather"`. Keep raw for the runtime;
+    # the old assignment matcher split this at the inner `:=`.
+    if s.startswith("("):
+        _close = _scan_balanced(s, 0, "(", ")")
+        if 0 < _close < len(s) and s[_close:].strip().startswith((".", "[")):
+            return ExprStmt(s)
+    # Complex assignment targets: `obj.prop := v`, `arr[i] := v`, and
+    # `(ctrl := Gui.Add(...)).Section := "Gather"` / `Gui.Add(...).Text := v`.
+    # Keep the whole line as an expression statement so the runtime can
+    # evaluate the LHS and store through the real object.
+    _assign_parts = _split_top(s, ":=")
+    if (len(_assign_parts) == 2 and _assign_parts[0].strip()
+            and _assign_parts[1].strip()
+            and not re.fullmatch(r"[A-Za-z_]\w*", _assign_parts[0].strip())):
+        return ExprStmt(s)
     mc = _match_call(s)
     if mc is not None:
         name, argstr, rest = mc
         # NOTE: _split_seq (not _parse_args): keeps quotes so runtime eval
         # sees "str" vs identifier. All call args are evaluated at runtime.
         raw_args = [p.strip() for p in _split_seq(argstr)] if argstr.strip() else []
-        # Gdip_* and SplitPath signatures are positional: callers omit
-        # middle/named arguments (`SplitPath(sFile,,, &ext)`), so keep the
-        # empty slots instead of shifting outputs left.
-        if not name.startswith("Gdip_") and name.lower() != "splitpath":
+        # Gdip_*, SplitPath and the Gui/control APIs use positional omitted
+        # arguments (`SplitPath(sFile,,, &ext)`, `Add("Text",, "x")`,
+        # `Move(, , 85)`), so keep the empty slots.
+        if not _keep_empty_args(name):
             raw_args = [p for p in raw_args if p != ""]
         if rest.startswith("=>"):
             # fat-arrow definition: Name(params) => expr
@@ -966,15 +1024,15 @@ def parse_statement(line: str):
             _expr = rest[2:].strip()
             return FuncDef(name, _params, [Return(_expr if _expr else None)])
         # dotted method chain glued to THIS call: `obj.M().N()` (rest starts
-        # with `.`). A `.` appearing later (`, obj.M()`) is a new statement,
-        # handled by the `,` branch below — never a chain.
+        # with `.`). Keep the whole raw expression; the runtime evaluates
+        # each chain link with its own argument list. The old
+        # `name + "+" + methods` encoding dropped every chained call's args.
         if rest.startswith("."):
             chained, _rk = _scan_chain(rest)
             if chained:
-                name = name + "+" + "+".join(chained)
-                rest = rest[_rk:].strip()
+                return ExprStmt(s)
             if rest.startswith(","):
-                pass  # chain + more statements: fall into Seq below
+                pass  # not a chain; fall into Seq below
             elif rest:
                 return FuncCall("__raw__", [s])
         if rest.startswith(","):

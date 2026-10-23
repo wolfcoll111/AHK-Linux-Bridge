@@ -201,6 +201,9 @@ class Runtime:
         self._ipc_sock = None
         self._ipc_thread: threading.Thread | None = None
         self._ipc_stop = threading.Event()
+        # -- GUI surface (v0.6) --
+        self._guis: list = []
+        self._pending_abort: Aborted | None = None
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
 
     # -- built-in variables --
@@ -357,6 +360,20 @@ class Runtime:
                     self.vars[name] = saved_vars[name]
                 else:
                     self.vars.pop(name, None)
+
+    def _invoke_gui_callback(self, spec: tuple, control, info, event: str):
+        """Run a Gui OnEvent callback without leaking exceptions into Qt."""
+        try:
+            return self._invoke_callback(spec, [control, info])
+        except Aborted as exc:
+            # ExitApp may be called from a Close/Click handler. Qt slots must
+            # not let this cross the C++ boundary; park it for Runtime.wait.
+            self._pending_abort = exc
+            return 0
+        except Exception as exc:  # noqa: BLE001 - callbacks must not kill GUI
+            if not self._dispatch_error(exc):
+                self.logs.append(f"GUI {event} callback error: {exc}")
+            return 0
 
     def _run_exit_callbacks(self, reason: str = "Exit", code=0) -> bool:
         """Run OnExit callbacks; return True if one prevented the exit."""
@@ -596,8 +613,22 @@ class Runtime:
         if (self._keep_alive or self._timers or self._dynamic_hotkeys
                 or self._message_handlers):
             return True
+        if any(getattr(g, "visible", False) and not getattr(g, "destroyed", False)
+               for g in self._guis):
+            return True
         with self._process_lock:
             return any(child.poll() is None for child in self._children)
+
+    def _pump_gui(self):
+        """Let Qt deliver widget events, then surface a parked ExitApp."""
+        try:
+            from . import gui as _gui
+            _gui.process_events()
+        except Exception as exc:  # noqa: BLE001 - GUI must not kill the loop
+            self.logs.append(f"GUI pump failed: {exc}")
+        if self._pending_abort is not None:
+            exc, self._pending_abort = self._pending_abort, None
+            raise exc
 
     def _drain_messages(self):
         """Dispatch messages queued from timers, IPC or PostMessage."""
@@ -621,6 +652,7 @@ class Runtime:
             self._check()
             processed += self._process_due_timers()
             self._drain_messages()
+            self._pump_gui()
             if not self.has_pending_events():
                 break
             if deadline is not None and time.monotonic() >= deadline:
@@ -1165,7 +1197,10 @@ class Runtime:
         elif isinstance(st, P.Return):
             raise _Return(self._eval_expr(st.value) if st.value is not None else None)
         elif isinstance(st, P.ScopeDecl):
-            pass  # our vars are function-global already; static persists too
+            # Our vars are function-global already; static persists too.
+            # `global Name := value` still has to perform the initialization.
+            for name, raw in getattr(st, "initializers", []) or []:
+                self.vars[name] = self._eval_expr(raw)
         elif isinstance(st, P.Setting):
             name = st.name.lower()
             if name == "setworkingdir":
@@ -1290,9 +1325,23 @@ class Runtime:
         """
         base_expr, method = name.rsplit(".", 1)
         obj = self._eval_expr(base_expr)
+        if hasattr(obj, "ahk_dispatch"):
+            return True, obj.ahk_dispatch(method, raw_args, self)
         if isinstance(obj, TrayMenu):
             return True, obj.dispatch(method, raw_args, self)
         return self._collection_method(obj, method, raw_args)
+
+    def _dispatch_object_method(self, obj, method: str, raw_args: list):
+        """Dispatch one link of a `.A(...).B(...)` chain."""
+        if hasattr(obj, "ahk_dispatch"):
+            return obj.ahk_dispatch(method, raw_args, self)
+        if isinstance(obj, TrayMenu):
+            return obj.dispatch(method, raw_args, self)
+        handled, result = self._collection_method(obj, method, raw_args)
+        if handled:
+            return result
+        self.logs.append(f"method .{method.lower()}() unsupported (logged)")
+        return ""
 
     def _collection_method(self, obj, method: str, raw_args: list):
         """AHK v2 Map/Array methods used by the corpus."""
@@ -1419,6 +1468,19 @@ class Runtime:
         low = c.name.lower()
         if low.startswith("gdip_"):
             return self._gdip_builtin(c.name, c.args)
+        if low == "gui":
+            from .gui import Gui as _Gui
+            args = c.args
+
+            def gui_arg(index, default=""):
+                if index < len(args) and str(args[index]).strip():
+                    try:
+                        return self._eval_expr(args[index])
+                    except Exception:
+                        return default
+                return default
+
+            return _Gui(self, options=gui_arg(0, ""), title=gui_arg(1, ""))
         if low == "onexit":
             spec = self._callback_spec(c.args[0]) if c.args else None
             addremove = 1
@@ -2416,6 +2478,213 @@ class Runtime:
         name = "".join(out)
         return name if re.fullmatch(r"[A-Za-z_]\w*", name) else ""
 
+    @staticmethod
+    def _is_atomic_expr(s: str) -> bool:
+        """True when `s` has no top-level whitespace (one concat atom)."""
+        depth, q, k = 0, None, 0
+        while k < len(s):
+            ch = s[k]
+            if ch == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            elif depth == 0 and ch.isspace():
+                return False
+            k += 1
+        return True
+
+    @staticmethod
+    def _has_top_operator(s: str) -> bool:
+        """True when an expression has a top-level arithmetic/ternary op."""
+        depth, q, k = 0, None, 0
+        while k < len(s):
+            ch = s[k]
+            if ch == "`" and k + 1 < len(s):
+                k += 2
+                continue
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            elif depth == 0 and ch in "+-*/?":
+                return True
+            k += 1
+        return False
+
+    @staticmethod
+    def _split_index_expr(s: str):
+        """Split a final top-level `base[index]` read, or return None."""
+        st = s.strip()
+        if not st.endswith("]"):
+            return None
+        depth, q, k, start = 0, None, 0, -1
+        while k < len(st):
+            ch = st[k]
+            if ch == "`" and k + 1 < len(st):
+                k += 2
+                continue
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+            elif ch == "[":
+                if depth == 0:
+                    start = k
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth < 0:
+                    return None
+            k += 1
+        if depth != 0 or start <= 0:
+            return None
+        if P._scan_balanced(st, start, "[", "]") != len(st):
+            return None
+        base, inner = st[:start].strip(), st[start + 1:-1]
+        if not base or not Runtime._is_atomic_expr(base):
+            return None
+        if Runtime._has_top_operator(base):
+            return None
+        return base, inner
+
+    @staticmethod
+    def _split_last_access(lhs: str):
+        """Return `(base, (kind, key))` for the final property/index access."""
+        st = lhs.strip()
+        idx = Runtime._split_index_expr(st)
+        if idx is not None:
+            return idx[0], ("idx", idx[1])
+        depth, q, k, last = 0, None, 0, -1
+        while k < len(st):
+            ch = st[k]
+            if ch == "`" and k + 1 < len(st):
+                k += 2
+                continue
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            elif ch == "." and depth == 0 and k > 0:
+                last = k
+            k += 1
+        if last > 0:
+            prop = st[last + 1:].strip()
+            base = st[:last].strip()
+            if base and re.fullmatch(r"[A-Za-z_]\w*", prop):
+                return base, ("key", prop)
+        return None
+
+    def _set_expr_target(self, lhs: str, value):
+        """Store into an arbitrary assignment LHS (property/index/dynamic)."""
+        lhs = lhs.strip()
+        dynamic = re.fullmatch(r"%(.+)%", lhs)
+        if dynamic:
+            name = self._eval_expr(dynamic.group(1).strip())
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name.strip()):
+                self.vars[name.strip()] = value
+            else:
+                self.logs.append(f"assign-target {lhs!r} resolved to {name!r} (logged)")
+            return
+        if re.fullmatch(r"[A-Za-z_]\w*", lhs):
+            self.vars[lhs] = value
+            return
+        access = self._split_last_access(lhs)
+        if access is None:
+            self.logs.append(f"assign-target {lhs!r} unsupported (logged)")
+            return
+        base_expr, (kind, key_raw) = access
+        try:
+            obj = self._eval_expr(base_expr)
+            key = self._eval_expr(key_raw) if kind == "idx" else key_raw
+            self._store(obj, kind, key, value)
+        except (TypeError, ValueError, IndexError, KeyError) as exc:
+            self.logs.append(f"assign-target {lhs!r} failed: {exc}")
+
+    @staticmethod
+    def _split_method_chain(s: str):
+        """Split `base.A(args).B(args)` into `(base, [(A,args), ...])`.
+
+        The previous regex took the first method and swallowed the rest of
+        the chain into its argument string, so `Gui.Add(...).OnEvent(...)`
+        lost the OnEvent callback. This scans top-level links and uses
+        balanced argument groups.
+        """
+        st = s.strip()
+        n = len(st)
+        depth, q, k = 0, None, 0
+        methods: list[tuple[str, str]] = []
+        base_end = -1
+        while k < n:
+            ch = st[k]
+            if ch == "`" and k + 1 < n:
+                k += 2
+                continue
+            if q:
+                if ch == q:
+                    q = None
+                k += 1
+                continue
+            if ch in ('"', "'"):
+                q = ch
+                k += 1
+                continue
+            if ch in "([{":
+                depth += 1
+                k += 1
+                continue
+            if ch in ")]}":
+                depth = max(0, depth - 1)
+                k += 1
+                continue
+            if (depth == 0 and ch == "." and k + 1 < n
+                    and (st[k + 1].isalpha() or st[k + 1] == "_")):
+                j = k + 1
+                while j < n and (st[j].isalnum() or st[j] == "_"):
+                    j += 1
+                m = re.match(r"\s*\(", st[j:])
+                if not m:
+                    k += 1
+                    continue
+                if not methods:
+                    base = st[:k].strip()
+                    if not base:
+                        return None
+                elif k != base_end:
+                    return None
+                paren = j + m.end() - 1
+                after = P._scan_balanced(st, paren, "(", ")")
+                if after < 0:
+                    return None
+                methods.append((st[k + 1:j], st[paren + 1:after - 1]))
+                k = after
+                base_end = k
+                if k < n and st[k] != ".":
+                    return None
+                continue
+            k += 1
+        if not methods or base_end != n:
+            return None
+        return base, methods
+
     def _assign_target(self, target: str, value):
         """Indexed/property assignment: arr[i] := v, a[i][k] := v, obj.p := v."""
         val = self._eval_expr(value)
@@ -2425,6 +2694,9 @@ class Runtime:
             if not m:
                 break
             target = target[:m.start()] + str(self.vars.get(m.group(1), "")) + target[m.end():]
+        if re.fullmatch(r"[A-Za-z_]\w*", target.strip()):
+            self.vars[target.strip()] = val
+            return
         m = re.match(r"^([A-Za-z_]\w*)(.*)$", target.strip(), re.DOTALL)
         if not m:
             self.logs.append(f"assign-target {target!r} unsupported (logged)")
@@ -2483,8 +2755,9 @@ class Runtime:
         except (TypeError, ValueError, IndexError, KeyError) as e:
             self.logs.append(f"assign-target {target!r} failed: {e}")
 
-    @staticmethod
-    def _access(obj, key):
+    def _access(self, obj, key):
+        if hasattr(obj, "ahk_get"):
+            return obj.ahk_get(key)
         if isinstance(obj, (list, tuple)):
             return obj[int(key) - 1]
         if isinstance(obj, str):
@@ -2493,10 +2766,17 @@ class Runtime:
             return obj[key] if key in obj else obj[str(key)]
         if isinstance(obj, TrayMenu):
             return getattr(obj, str(key).lower(), "")
-        raise TypeError(f"cannot index {type(obj).__name__}")
+        self._log_once(f"indexing {type(obj).__name__} not modeled (logged)")
+        return ""
 
     @staticmethod
     def _store(obj, kind, key, val):
+        if kind == "key" and hasattr(obj, "ahk_set_property"):
+            obj.ahk_set_property(key, val)
+            return
+        if kind == "idx" and hasattr(obj, "ahk_set"):
+            obj.ahk_set(key, val)
+            return
         if isinstance(obj, list) and kind == "idx":
             i = int(key) - 1
             if 0 <= i < len(obj):
@@ -3108,37 +3388,74 @@ class Runtime:
             val = self._eval_expr(m.group(2).strip())
             self.vars[m.group(1)] = val
             return val
+        # complex assignment in an expression: obj.prop := v, arr[i] := v,
+        # (ctrl := Gui.Add(...)).Section := "Gather".
+        _assign = P._split_top(s, ":=")
+        if (len(_assign) == 2 and _assign[0].strip() and _assign[1].strip()
+                and not re.fullmatch(r"[A-Za-z_]\w*", _assign[0].strip())):
+            lhs = _assign[0].strip()
+            val = self._eval_expr(_assign[1].strip())
+            self._set_expr_target(lhs, val)
+            return val
+        # explicit final index read: MainGui["StartButton"], arr[i], a[1][2]
+        _idx = self._split_index_expr(s)
+        if _idx is not None:
+            base, index_raw = _idx
+            return self._access(self._eval_expr(base),
+                                self._eval_expr(index_raw))
+        # method chain: base.A(args).B(args), each link keeps its own args.
+        _chain = self._split_method_chain(s)
+        if _chain is not None:
+            base, methods = _chain
+            if not self._is_atomic_expr(base):
+                _chain = None
+        if _chain is not None:
+            base, methods = _chain
+            obj = self._eval_expr(base)
+            for meth, argstr in methods:
+                from .parser import _split_seq as _ss_chain
+                raw = [p.strip() for p in _ss_chain(argstr)] if argstr.strip() else []
+                if not P._keep_empty_args(meth):
+                    raw = [p for p in raw if p != ""]
+                obj = self._dispatch_object_method(obj, meth, raw)
+            return obj
         # function / method call inside expressions (raw args: quotes kept)
         m = re.match(r"^([A-Za-z_]\w*)\s*\((.*)\)$", s, re.DOTALL)
         if m and self._balanced(s):
             from .parser import _split_seq as _ss
             _args = [p.strip() for p in _ss(m.group(2))] if m.group(2).strip() else []
-            # Gdip_* calls use positional omitted arguments; preserve empties.
-            if not m.group(1).startswith("Gdip_"):
+            # Gdip_*/Gui APIs use positional omitted arguments; preserve empties.
+            if not P._keep_empty_args(m.group(1)):
                 _args = [p for p in _args if p != ""]
             return self._call_value(P.FuncCall(m.group(1), _args))
         m = re.match(r"^(.+?)\.([A-Za-z_]\w*)\s*\((.*)\)$", s, re.DOTALL)
         if m and self._balanced(s):
-            obj, meth, argstr = self._eval_expr(m.group(1)), m.group(2).lower(), m.group(3)
+            obj, meth, argstr = self._eval_expr(m.group(1)), m.group(2), m.group(3)
             from .parser import _split_seq as _ss2
             _raw = [p.strip() for p in _ss2(argstr)] if argstr.strip() else []
-            args = [p for p in _raw if p != ""]
+            if not P._keep_empty_args(meth):
+                _raw = [p for p in _raw if p != ""]
+            if hasattr(obj, "ahk_dispatch"):
+                return obj.ahk_dispatch(meth, _raw, self)
             if isinstance(obj, TrayMenu):
                 return obj.dispatch(meth, _raw, self)
-            handled, result = self._collection_method(obj, meth, _raw)
+            handled, result = self._collection_method(obj, meth.lower(), _raw)
             if handled:
                 return result
-            self.logs.append(f"method .{meth}() unsupported (logged)")
+            self.logs.append(f"method .{meth.lower()}() unsupported (logged)")
             return ""
         # AHK rule: `a.b` (no spaces) is object access, `a . b` is concat.
         m = re.match(r"^(.+?)\.([A-Za-z_]\w*)$", s, re.DOTALL)
-        if m and re.search(r"\S\.\S", s):
+        if (m and re.search(r"\S\.\S", s)
+                and self._is_atomic_expr(m.group(1))):
             obj = self._eval_expr(m.group(1))
             prop = m.group(2).lower()
             if prop == "length" and isinstance(obj, (list, str, dict)):
                 return len(obj)
             if isinstance(obj, dict):
                 return obj.get(m.group(2), obj.get(prop, ""))
+            if hasattr(obj, "ahk_get_property"):
+                return obj.ahk_get_property(m.group(2))
             if isinstance(obj, TrayMenu):
                 if prop == "default":
                     return obj.default or ""
@@ -3381,6 +3698,9 @@ class Runtime:
             return True
         if re.match(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\s*\(", term):
             return True
+        m = re.fullmatch(r"([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)+", term)
+        if m:
+            return m.group(1) in self.vars
         if re.search(r"\[[^\]]+\]", term):
             return True
         return False
@@ -3683,8 +4003,18 @@ class Runtime:
         for op, any_of in (("||", True), ("&&", False)):
             parts = self._split_logic(cond, op)
             if len(parts) > 1:
-                vals = [self._cond(p) for p in parts]
-                return any(vals) if any_of else all(vals)
+                # AHK/AutoHotkey short-circuits both operators.  Evaluating
+                # every branch eagerly breaks guards such as
+                # `A_Args.Has(1) && (A_Args[1] = 1)` on an empty array.
+                if any_of:
+                    for part in parts:
+                        if self._cond(part):
+                            return True
+                    return False
+                for part in parts:
+                    if not self._cond(part):
+                        return False
+                return True
         # leading negation: !x, !FileExist(f)
         if cond.startswith("!") and not cond.startswith("!="):
             return not self._cond(cond[1:].strip())
