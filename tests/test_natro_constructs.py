@@ -50,6 +50,40 @@ def test_for_over_list_literal():
     assert types(sim) == ["10", "20"]
 
 
+def test_strsplit_without_delimiter_splits_characters():
+    sc, rt, sim = run(
+        'for digit in StrSplit("12345678") {\nSend digit\n}\n')
+    rt.run_auto()
+    assert types(sim) == list("12345678")
+
+
+def test_condition_call_with_assignment_inside_args():
+    # A call containing `x := 1` must not be mistaken for a top-level
+    # comparison; that bug made HashFile DllCall conditions evaluate as
+    # strings and throw OSError before the crypto call ran.
+    sc, rt, sim = run(
+        'F(v) {\n'
+        '    return 1\n'
+        '}\n'
+        'if !F(x := 1)\n'
+        '    Send "bad"\n'
+        'else\n'
+        '    Send "ok"\n')
+    rt.run_auto()
+    assert types(sim) == ["ok"]
+    assert rt.vars["x"] == 1
+
+
+def test_bitwise_and_hex_literals():
+    sc, rt, sim = run(
+        'x := (222 & 0xff)\n'
+        'y := Format("{:02x}", 0xde)\n'
+        'z := 1 << 3 | 1\n'
+        'Send x "|" y "|" z\n')
+    rt.run_auto()
+    assert types(sim) == ["222|de|9"]
+
+
 def test_try_catch_finally():
     sc, rt, sim = run('try {\nThrow "boom"\n} Catch e {\nSend "caught"\n} Finally {\nSend "fin"\n}\n')
     rt.run_auto()
@@ -409,6 +443,19 @@ def test_deref_and_a_index():
     sc, rt, sim = run('i := 2\nPlanterName2 := "ok"\nSend PlanterName%i%\nLoop 2 {\nSend "{A_Index}"\n}\n')
     rt.run_auto()
     assert types(sim) == ["ok", "1", "2"]
+
+
+def test_variable_names_are_case_insensitive():
+    # Natro mixes the built-in `A_Index` and legacy `A_index` spellings in
+    # dynamic variable references (BlenderItem%A_index%).
+    sc, rt, sim = run(
+        'BlenderItem1 := "None"\n'
+        "Loop 1 {\n"
+        "value := BlenderItem%A_index%\n"
+        "Send value\n"
+        "}\n")
+    rt.run_auto()
+    assert types(sim) == ["None"]
 
 
 def test_substr_instr_strlen():

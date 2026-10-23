@@ -640,10 +640,11 @@ class Runtime:
             m = re.search(r"%([A-Za-z_]\w*)%", text)
             if not m:
                 break
-            text = (text[:m.start()] + str(self.vars.get(m.group(1), ""))
+            text = (text[:m.start()] + str(self._get_var(m.group(1)))
                     + text[m.end():]).strip()
         if re.fullmatch(r"[A-Za-z_]\w*", text):
-            return str(self.vars[text]) if text in self.vars else text
+            key = self._var_key(text)
+            return str(self.vars[key]) if key is not None else text
         if self._is_whole_quoted(text):
             return self._interp(text[1:-1])
         try:
@@ -1419,8 +1420,8 @@ class Runtime:
                 dm = re.search(r"%([A-Za-z_]\w*)%", name)
                 if not dm:
                     break
-                name = name[:dm.start()] + str(self.vars.get(dm.group(1), "")) + name[dm.end():]
-            cur = self.vars.get(name, 0)
+                name = name[:dm.start()] + str(self._get_var(dm.group(1))) + name[dm.end():]
+            cur = self._get_var(name)
             val = self._eval_expr(st.value)
             try:
                 if st.op == "+=":
@@ -1994,21 +1995,40 @@ class Runtime:
             self._stub_warned.add(message)
             self.logs.append(message)
 
+    def _var_key(self, name: str):
+        """Canonical key for an AHK variable (names are case-insensitive)."""
+        name = str(name)
+        if name in self.vars:
+            return name
+        low = name.lower()
+        for key in self.vars:
+            if key.lower() == low:
+                return key
+        return None
+
     def _get_var(self, name: str):
         """Read a variable, lazily loading the real system clipboard.
 
         ``A_Clipboard`` is special in AHK.  Read it once on first use so a
         user's existing clipboard is visible, but never overwrite a value the
         script has just assigned (that would race the external helper).
+        AHK variable names are case-insensitive; Natro mixes `A_Index` with
+        the legacy `A_index` spelling in generated expressions.
         """
-        if name == "A_Clipboard" and not self._clipboard_loaded:
+        key = self._var_key(name)
+        if key is not None:
+            name = key
+        if name.lower() == "a_clipboard" and not self._clipboard_loaded:
             from . import clipboard as _clipboard
             self.vars[name] = _clipboard.read_text()
             self._clipboard_loaded = True
         return self.vars.get(name, "")
 
     def _set_var(self, name: str, value):
-        if name == "A_Clipboard":
+        key = self._var_key(name)
+        if key is not None:
+            name = key
+        if name.lower() == "a_clipboard":
             from . import clipboard as _clipboard
             try:
                 ok = _clipboard.write_text(value)
@@ -2804,7 +2824,9 @@ class Runtime:
                 s = str(ev(args[0]))
                 delims = str(ev(args[1])) if len(args) > 1 else ""
                 if not delims:
-                    return [s]
+                    # AHK v2: omitted/blank delimiters split into characters.
+                    # Natro relies on this for priorityListNumeric digits.
+                    return list(s)
                 parts, cur = [], ""
                 for ch in s:
                     if ch in delims:
@@ -3632,7 +3654,7 @@ class Runtime:
             m = re.search(r"%([A-Za-z_]\w*)%", target)
             if not m:
                 break
-            target = target[:m.start()] + str(self.vars.get(m.group(1), "")) + target[m.end():]
+            target = target[:m.start()] + str(self._get_var(m.group(1))) + target[m.end():]
         if re.fullmatch(r"[A-Za-z_]\w*", target.strip()):
             self._set_var(target.strip(), val)
             return
@@ -4302,7 +4324,7 @@ class Runtime:
             m = re.search(r"%([A-Za-z_]\w*)%", s)
             if not m:
                 break
-            s = s[:m.start()] + str(self.vars.get(m.group(1), "")) + s[m.end():]
+            s = s[:m.start()] + str(self._get_var(m.group(1))) + s[m.end():]
         s = s.strip()
         if s == "":
             return ""
@@ -4325,7 +4347,7 @@ class Runtime:
             lo, hi = (lo, hi) if lo <= hi else (hi, lo)
             return self._rng.randint(lo, hi)
         # bare var
-        if re.match(r"^[A-Za-z_]\w*$", s) and s in self.vars:
+        if re.match(r"^[A-Za-z_]\w*$", s) and self._var_key(s) is not None:
             return self._get_var(s)
         # chained assignment in expressions: x := y := 5
         m = re.match(r"^([A-Za-z_]\w*)\s*:=\s*(.+)$", s, re.DOTALL)
@@ -4497,7 +4519,8 @@ class Runtime:
             pass
         # unknown identifier -> 0 (AHK-ish falsy) unless it's a var name to keep
         if re.match(r"^[A-Za-z_]\w*$", s):
-            return self.vars.get(s, 0)
+            key = self._var_key(s)
+            return self.vars.get(key, 0) if key is not None else 0
         return s
 
     @staticmethod
@@ -4791,10 +4814,18 @@ class Runtime:
                 out.append(ch)
                 k += 1
                 continue
+            # Preserve numeric literals (including hex `0xff`) before
+            # treating their letters as variable names.  Without this,
+            # `0xff` became `0x` + variable `xff` -> 0.
+            mn = re.match(r"0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?", s[k:])
+            if mn:
+                out.append(mn.group(0))
+                k += len(mn.group(0))
+                continue
             m = re.match(r"[A-Za-z_]\w*", s[k:])
             if m:
                 name = m.group(0)
-                literal = self._num_literal(self.vars.get(name, 0))
+                literal = self._num_literal(self._get_var(name) or 0)
                 if literal is None:
                     return None
                 out.append(literal)
@@ -4842,10 +4873,13 @@ class Runtime:
             v = self._safe_eval(node.operand)
             return v if isinstance(node.op, ast.UAdd) else -v
         if isinstance(node, ast.BinOp) and isinstance(node.op,
-                (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)):
+                (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod,
+                 ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor,
+                 ast.LShift, ast.RShift)):
             a, b = self._safe_eval(node.left), self._safe_eval(node.right)
             # AHK auto-converts numeric strings: "00" * 3600 == 0, never
-            # Python-style string repetition.
+            # Python-style string repetition.  Bitwise operators (used by
+            # HashFile's NumGet hex loop) require integers, not floats.
             try:
                 a = self._numval(a) if isinstance(a, str) else a
                 b = self._numval(b) if isinstance(b, str) else b
@@ -4853,7 +4887,15 @@ class Runtime:
                 raise ValueError("non-numeric operands")
             ops = {ast.Add: _op.add, ast.Sub: _op.sub, ast.Mult: _op.mul,
                    ast.Div: _op.truediv, ast.FloorDiv: _op.floordiv, ast.Mod: _op.mod,
-                   ast.Pow: _op.pow}
+                   ast.Pow: _op.pow, ast.BitAnd: _op.and_,
+                   ast.BitOr: _op.or_, ast.BitXor: _op.xor,
+                   ast.LShift: _op.lshift, ast.RShift: _op.rshift}
+            if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor,
+                                    ast.LShift, ast.RShift)):
+                try:
+                    a, b = int(a), int(b)
+                except (TypeError, ValueError):
+                    raise ValueError("non-integer bitwise operands")
             return ops[type(node.op)](a, b)
         raise ValueError("unsupported expression")
 
@@ -4966,7 +5008,8 @@ class Runtime:
         text = self._unescape_ahk(str(text))
 
         def rep(m):
-            return str(self.vars.get(m.group(1), m.group(0)))
+            key = self._var_key(m.group(1))
+            return str(self.vars.get(key)) if key is not None else m.group(0)
         return re.sub(r"\{(\w+)\}", rep, text)
 
     def _cond(self, cond: str) -> bool:
@@ -5017,11 +5060,15 @@ class Runtime:
             except _re2.error:
                 return False
         # paren-wrapped or full expressions: (x > 1), FoundX >= 0, etc.
-        m = re.match(r"^(.+?)\s*(<=|>=|==|!=|=|<|>)\s*(.+)$", cond)
-        if m:
-            lhs = self._eval_expr(m.group(1).strip())
-            rhs = self._eval_expr(m.group(3).strip())
-            op = m.group(2)
+        # Only split at a TOP-LEVEL comparison operator.  In particular, a
+        # function call containing `:=` (HashFile's DllCall arguments) must
+        # not be mistaken for `lhs = rhs`; the old regex matched the `=` in
+        # `:=` and made the crypto calls evaluate as strings.
+        cmp_parts = self._split_comparison(cond)
+        if cmp_parts is not None:
+            lhs_raw, op, rhs_raw = cmp_parts
+            lhs = self._eval_expr(lhs_raw)
+            rhs = self._eval_expr(rhs_raw)
             try:
                 li, ri = int(lhs), int(rhs)
                 cmp = {"<": li < ri, ">": li > ri, "<=": li <= ri,
@@ -5047,6 +5094,50 @@ class Runtime:
             return int(cond) != 0
         v = self._eval_expr(cond) if cond not in self.vars else self.vars.get(cond)
         return self._truthy(v)
+
+    @staticmethod
+    def _split_comparison(text: str):
+        """Find a top-level comparison operator, ignoring `:=` and nested
+        calls.  Returns (lhs, op, rhs) or None."""
+        text = str(text)
+        depth = 0
+        quote = None
+        k = 0
+        while k < len(text):
+            ch = text[k]
+            if quote:
+                if ch == "`" and k + 1 < len(text):
+                    k += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                k += 1
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                k += 1
+                continue
+            if ch in "([{":
+                depth += 1
+                k += 1
+                continue
+            if ch in ")]}":
+                depth = max(0, depth - 1)
+                k += 1
+                continue
+            if depth == 0:
+                two = text[k:k + 2]
+                if two in ("<=", ">=", "==", "!=", "~="):
+                    return text[:k].strip(), two, text[k + 2:].strip()
+                if ch in "<>":
+                    return text[:k].strip(), ch, text[k + 1:].strip()
+                if ch == "=":
+                    prev = text[k - 1] if k else ""
+                    nxt = text[k + 1] if k + 1 < len(text) else ""
+                    if prev not in (":", "=", "!", "<", ">") and nxt not in ("=", ">"):
+                        return text[:k].strip(), "=", text[k + 1:].strip()
+            k += 1
+        return None
 
     @staticmethod
     def _truthy(v) -> bool:
