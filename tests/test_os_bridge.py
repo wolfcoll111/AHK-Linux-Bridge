@@ -289,9 +289,54 @@ def test_missing_external_window_is_logged_and_falsy(monkeypatch):
     monkeypatch.setattr(wo, "find", lambda text: 0)
     rt = run(
         'found := WinExist("No Such Window")\n'
-        'title := WinGetTitle("No Such Window")\n'
+        'caught := 0\n'
+        'try\n'
+        '    title := WinGetTitle("No Such Window")\n'
+        'catch TargetError\n'
+        '    caught := 1\n'
     )
     rt.run_auto()
     assert rt.vars["found"] == 0
-    assert rt.vars["title"] == ""
+    assert rt.vars["caught"] == 1
     assert any("not found" in line for line in rt.logs)
+
+
+def test_missing_roblox_window_returns_zero_not_success(monkeypatch):
+    """The exact GetRobloxClientPos() contract from Natro's Roblox.ahk."""
+    import ahk_bridge.window_ops as wo
+
+    monkeypatch.setattr(wo, "find", lambda text: 0)
+    rt = run(
+        'GetRobloxClientPos()\n'
+        '{\n'
+        '    try\n'
+        '        WinGetClientPos &wx, &wy, &ww, &wh, "ahk_id 0"\n'
+        '    catch TargetError\n'
+        '        return wx := wy := ww := wh := 0\n'
+        '    else\n'
+        '        return 1\n'
+        '}\n'
+        'result := GetRobloxClientPos()\n'
+    )
+    rt.run_auto()
+    assert rt.vars["result"] == 0
+    assert rt.vars["wx"] == rt.vars["wy"] == 0
+    assert rt.vars["ww"] == rt.vars["wh"] == 0
+
+
+def test_missing_control_raises_target_error():
+    pytest.importorskip("PySide6")
+    rt = run(
+        'MainGui := Gui("", "MissingControl")\n'
+        'MainGui.Show("w300 h200")\n'
+        'caught := 0\n'
+        'try\n'
+        '    text := ControlGetText("NoSuchControl", "A")\n'
+        'catch TargetError\n'
+        '    caught := 1\n'
+    )
+    try:
+        rt.run_auto()
+        assert rt.vars["caught"] == 1
+    finally:
+        _close_guis(rt)

@@ -24,6 +24,10 @@ from . import parser as P
 ABORT_KEYS = ("Escape", "Ctrl+Alt+C")
 
 
+class TargetError(RuntimeError):
+    """AHK `TargetError`: a window/control required by a call was not found."""
+
+
 class Aborted(RuntimeError):
     def __init__(self, message: str = "", exit_code=None):
         super().__init__(message)
@@ -2065,16 +2069,23 @@ class Runtime:
     def _win_get_pos(self, args, client=False):
         raw_title = args[4] if len(args) > 4 else ""
         target = self._resolve_window(self._window_arg(raw_title, ""))
+        if target is None:
+            # Natro's GetRobloxClientPos() relies on this: a missing window is
+            # a TargetError, not a successful 0x0 client rectangle.
+            raise TargetError(
+                f"WinGet{'Client' if client else ''}Pos: target window not found")
         rect = self._window_rect(target, client=client)
         for index, value in enumerate(rect):
             if index < len(args):
                 self._assign_output(args[index], value)
-        return 1 if target is not None else 0
+        return 1
 
     def _win_get_title(self, args):
         raw = args[0] if args else ""
         target = self._resolve_window(self._window_arg(raw, ""))
-        return target.get("title", "") if target else ""
+        if target is None:
+            raise TargetError("WinGetTitle: target window not found")
+        return target.get("title", "")
 
     def _win_exist(self, args):
         raw = args[0] if args else ""
@@ -2180,28 +2191,31 @@ class Runtime:
         found = self._find_control(
             self._window_arg(control_raw, ""), win_raw)
         if found is None:
-            rect = (0, 0, 0, 0)
-        else:
-            gui, control = found
-            rect = self._control_rect(gui, control, screen=False)
+            raise TargetError("ControlGetPos: target control not found")
+        gui, control = found
+        rect = self._control_rect(gui, control, screen=False)
         for index, value in enumerate(rect):
             if index < len(args):
                 self._assign_output(args[index], value)
-        return 1 if found else 0
+        return 1
 
     def _control_get_text(self, args):
         control_raw = args[0] if args else ""
         win_raw = args[1] if len(args) > 1 else ""
         found = self._find_control(
             self._window_arg(control_raw, ""), win_raw)
-        return found[1].get_text() if found else ""
+        if found is None:
+            raise TargetError("ControlGetText: target control not found")
+        return found[1].get_text()
 
     def _control_get_hwnd(self, args):
         control_raw = args[0] if args else ""
         win_raw = args[1] if len(args) > 1 else ""
         found = self._find_control(
             self._window_arg(control_raw, ""), win_raw)
-        return found[1].hwnd if found else 0
+        if found is None:
+            raise TargetError("ControlGetHwnd: target control not found")
+        return found[1].hwnd
 
     def _win_activate_value(self, value):
         target = self._resolve_window(value)
