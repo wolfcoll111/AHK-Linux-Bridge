@@ -66,10 +66,24 @@ def test_language_gap_is_load_bearing_but_known():
     assert census.load_bearing_for("language-gap") is True
 
 
-def test_memory_primitives_are_windows_only():
-    for name in ("NumGet", "NumPut", "StrPtr", "ComValue", "ComObjGet",
-                 "StrGet"):
-        assert census.verdict_for(name, "builtin") == "windows-only"
+def test_com_surface_keeps_a_known_gap_verdict():
+    for name in ("ComValue", "ComObjGet", "ComCall"):
+        assert census.verdict_for(name, "builtin") in (
+            "windows-only", "external-service")
+
+
+def test_unmodeled_dllcall_is_classified_and_visible():
+    kind, name, _ = census.classify_log(
+        "DllCall Shell32\\SHEvaluateSystemCommandTemplate: Windows ABI "
+        "not modeled on Linux (returns 0; logged)")
+    assert (kind, name) == ("dllcall",
+                            "Shell32\\SHEvaluateSystemCommandTemplate")
+    assert census.verdict_for(name, kind) == "windows-only"
+    # A display-only no-op still stays visible in the report.
+    kind, name, _ = census.classify_log(
+        "DllCall DeleteObject: display-only/no-op on Linux (logged)")
+    assert kind == "dllcall" and name == "DeleteObject"
+    assert census.verdict_for(name, kind) == "windows-only"
 
 
 def test_aggregate_is_case_insensitive_for_cross_file():

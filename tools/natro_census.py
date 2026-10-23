@@ -48,12 +48,10 @@ EXTERNAL = {
     "winhttp", "download", "discord",
 }
 WINDOWS_ONLY = {
-    "dllcall", "processclose", "processexist", "winexist", "winactivate",
-    "wingetpos", "wingetclientpos", "wingettitle", "wingettext", "winclose",
-    "winkill", "winmove", "winsettransparent", "controlgetpos",
-    "controlgettext", "sendmessage", "postmessage", "onmessage",
-    # Memory/COM primitives: only meaningful to DllCall/GDI+ consumers.
-    "numget", "numput", "strptr", "comvalue", "comobjget", "strget",
+    # Window/control, clipboard, memory and process bridges are implemented
+    # in v0.7; only the Windows-ABI/COM surface remains here.  Unmodeled
+    # DllCall exports are classified dynamically from their log line.
+    "dllcall", "comcall", "comvalue", "comobjget", "comobject", "objrelease",
 }
 
 
@@ -314,6 +312,7 @@ RE_CMD_NOOP = re.compile(r"^(\w+)(?:\s.*?)? \((?:OS/window op|noted), linux no-o
 RE_SETTING = re.compile(r"^setting (\S+) ")
 RE_INCLUDE = re.compile(r"^#Include (.+?) \(not inlined")
 RE_GDIP_ERR = re.compile(r"^(Gdip_\w+) failed")
+RE_DLLCALL = re.compile(r"^DllCall ([^:]+): ")
 RE_CENSUS = re.compile(r"^census: ")
 
 
@@ -354,6 +353,11 @@ def classify_log(line: str):
     m = RE_GDIP_ERR.match(line)
     if m:
         return ("gdip-error", m.group(1), line)
+    m = RE_DLLCALL.match(line)
+    if m:
+        # Whitelisted calls that are real/Linux-equivalent do not log; every
+        # hit here is an explicit display-only no-op or an unmodeled export.
+        return ("dllcall", m.group(1).strip(), line)
     if RE_SKIP.match(line):
         text = m.group(1)
         name = text.split("(", 1)[0].strip() if "(" in text else text[:60]
@@ -373,7 +377,7 @@ def verdict_for(name: str, kind: str) -> str:
         return "display-only"
     if low in EXTERNAL:
         return "external-service"
-    if low in WINDOWS_ONLY or kind in ("gdip", "gdip-error"):
+    if low in WINDOWS_ONLY or kind in ("gdip", "gdip-error", "dllcall"):
         return "windows-only"
     return "unknown"
 
