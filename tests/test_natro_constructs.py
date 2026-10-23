@@ -184,6 +184,38 @@ def test_onerror_unhandled_still_raises_and_can_be_removed():
         rt.run_auto()
 
 
+def test_fileopen_file_object_roundtrip(tmp_path):
+    base = str(tmp_path).replace("\\", "/")
+    text = (
+        f'f := FileOpen("{base}/data.txt", "w-d")\n'
+        'f.Write("alpha`n")\n'
+        'f.WriteLine("beta")\n'
+        "size := f.Length\n"
+        "f.Close()\n"
+        f'f := FileOpen("{base}/data.txt", "r")\n'
+        "first := f.ReadLine()\n"
+        "rest := f.Read()\n"
+        "f.Seek(0)\n"
+        "whole := f.Read()\n"
+        "pos := f.Pos\n"
+        "eof := f.AtEOF\n"
+        "f.Close()\n"
+        f'f := FileOpen("{base}/data.txt", "a")\n'
+        'f.WriteLine("gamma")\n'
+        "f.Close()\n"
+    )
+    sc, rt, sim = run(text, working_dir=base)
+    rt.run_auto()
+    assert rt.vars["first"] == "alpha"
+    assert rt.vars["rest"] == "beta\n"
+    assert rt.vars["whole"] == "alpha\nbeta\n"
+    assert rt.vars["pos"] == len("alpha\nbeta\n")
+    assert rt.vars["eof"] == 1
+    assert rt.vars["size"] == len("alpha\nbeta\n")
+    assert (tmp_path / "data.txt").read_text().endswith("gamma\n")
+    assert not any("stub builtin fileopen" in line for line in rt.logs)
+
+
 def test_file_builtins_and_relative_working_directory(tmp_path):
     base = str(tmp_path)
     text = (

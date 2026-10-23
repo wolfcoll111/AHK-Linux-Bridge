@@ -115,6 +115,163 @@ class TrayMenu:
         return ""
 
 
+class AhkFile:
+    """Minimal AHK v2 File object backed by a real Linux file.
+
+    Natro uses ``FileOpen`` for imported patterns, config snapshots and its
+    debug log.  The supported surface is the one those paths need: ``Read``,
+    ``ReadLine``, ``Write``, ``WriteLine``, ``Seek``, ``Close`` and the
+    ``Length``/``Pos``/``AtEOF`` properties.  AHK's sharing flags (the
+    ``-d`` in ``w-d``) only affect Windows sharing modes; Linux has no
+    equivalent, so they are accepted and logged once rather than silently
+    changing open semantics.
+    """
+
+    _ENCODINGS = {
+        "utf-8": "utf-8", "utf8": "utf-8",
+        "utf-16": "utf-16", "utf16": "utf-16",
+        "cp0": "utf-8", "ansi": "utf-8",
+    }
+
+    def __init__(self, runtime, path: str, mode: str, encoding: str = ""):
+        self.runtime = runtime
+        self.path = path
+        text = str(mode or "r").strip().lower()
+        access, sep, share = text.partition("-")
+        if not access:
+            access = "r"
+        access = "".join(ch for ch in access if ch in "rwa") or "r"
+        self.access = access
+        self.share = share if sep else ""
+        enc = str(encoding or "").strip().strip('"').lower()
+        self.encoding = self._ENCODINGS.get(enc, "utf-8")
+        self.closed = False
+        # In AHK both access and sharing flags share one string; `d` after
+        # the dash is a share flag, not "delete on close".
+        if self.share:
+            runtime._log_once(
+                f"FileOpen: sharing flags {self.share!r} advertised, not "
+                "enforced on Linux")
+        if access == "rw":
+            py_mode = "r+" if os.path.exists(path) else "w+"
+        elif access == "a":
+            py_mode = "a"
+        elif access == "w":
+            py_mode = "w"
+        else:
+            py_mode = "r"
+        if "b" not in py_mode and py_mode.startswith("r"):
+            self._fh = open(path, py_mode, encoding="utf-8-sig")
+        else:
+            self._fh = open(path, py_mode, encoding=self.encoding,
+                            newline="")
+
+    # -- File object API -------------------------------------------------
+    def ahk_dispatch(self, method: str, raw_args: list, runtime):
+        m = method.lower()
+        if self.closed:
+            runtime._log_once(
+                f"File.{method} on closed file {self.path!r} (returns falsy)")
+            return "" if not m.startswith("read") else ""
+        if m == "read":
+            if raw_args and str(raw_args[0]).strip():
+                try:
+                    count = int(runtime._eval_expr(raw_args[0]))
+                except (TypeError, ValueError):
+                    count = -1
+                return self._fh.read(count if count >= 0 else -1)
+            return self._fh.read()
+        if m == "readline":
+            line = self._fh.readline()
+            return line.rstrip("\r\n") if line else ""
+        if m == "write":
+            data = (runtime._to_ahk_string(runtime._eval_expr(raw_args[0]))
+                    if raw_args else "")
+            written = self._fh.write(data)
+            return written
+        if m == "writeline":
+            data = (runtime._to_ahk_string(runtime._eval_expr(raw_args[0]))
+                    if raw_args else "")
+            written = self._fh.write(data + "\n")
+            return written
+        if m == "seek":
+            distance = 0
+            origin = 0
+            if raw_args:
+                try:
+                    distance = int(runtime._eval_expr(raw_args[0]))
+                except (TypeError, ValueError):
+                    distance = 0
+            if len(raw_args) > 1:
+                try:
+                    origin = int(runtime._eval_expr(raw_args[1]))
+                except (TypeError, ValueError):
+                    origin = 0
+            whence = {0: os.SEEK_SET, 1: os.SEEK_CUR, 2: os.SEEK_END}.get(
+                origin, os.SEEK_SET)
+            try:
+                return self._fh.seek(distance, whence)
+            except (OSError, ValueError) as exc:
+                runtime._log_once(f"File.Seek failed: {exc}")
+                return 0
+        if m == "close":
+            self.close()
+            return 1
+        if m in ("__delete", "destroy"):
+            self.close()
+            return ""
+        runtime._log_once(f"File.{method}() unsupported (logged)")
+        return ""
+
+    def ahk_get_property(self, name: str):
+        prop = str(name).lower()
+        if prop == "length":
+            if self.closed:
+                try:
+                    return os.path.getsize(self.path)
+                except OSError:
+                    return 0
+            try:
+                self._fh.flush()
+                return os.fstat(self._fh.fileno()).st_size
+            except (OSError, ValueError):
+                return 0
+        if prop == "pos":
+            if self.closed:
+                return 0
+            try:
+                return self._fh.tell()
+            except (OSError, ValueError):
+                return 0
+        if prop == "ateof":
+            if self.closed:
+                return 1
+            try:
+                here = self._fh.tell()
+                self._fh.seek(0, os.SEEK_END)
+                end = self._fh.tell()
+                self._fh.seek(here)
+                return 1 if here >= end else 0
+            except (OSError, ValueError):
+                return 1
+        if prop == "encoding":
+            return self.encoding
+        if prop == "path":
+            return self.path
+        return ""
+
+    def close(self):
+        if not self.closed:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self.closed = True
+
+    def __del__(self):
+        self.close()
+
+
 def _has_cmp_op(s: str) -> bool:
     """True when s contains a comparison operator outside string literals
     (`~=`, `<=`, `>=`, `==`, `!=`, or lone `=`/`<`/`>` not part of `:=`)."""
@@ -1542,6 +1699,17 @@ class Runtime:
         if low in ("run", "runwait"):
             raw = c.args[0] if c.args else ""
             return self._execute_run(raw, wait=(low == "runwait"))
+        if low == "fileopen" and c.args:
+            try:
+                path = self._abs_path(self._eval_expr(c.args[0]))
+                mode = (self._eval_expr(c.args[1])
+                        if len(c.args) > 1 else "r")
+                encoding = (self._eval_expr(c.args[2])
+                            if len(c.args) > 2 else "")
+                return AhkFile(self, path, str(mode), str(encoding))
+            except (OSError, ValueError, TypeError) as exc:
+                self._log_once(f"FileOpen failed: {exc} (returns falsy)")
+                return 0
         if low == "processclose" and c.args:
             return self._process_close(self._eval_expr(c.args[0]))
         if low == "exitapp":
@@ -4767,10 +4935,39 @@ class Runtime:
             return max(0, base + delta)
         return max(0, base)
 
+    @staticmethod
+    def _unescape_ahk(text: str) -> str:
+        """Decode AHK backtick escapes (`` `n ``, `` `t ``, `` `" `` ...).
+
+        This is string-literal processing, not a Windows feature: FileWrite,
+        Send and MsgBox all need it for Natro's generated pattern/config
+        text.  Unknown escapes drop the backtick, matching AHK.
+        """
+        if "`" not in text:
+            return text
+        table = {"n": "\n", "r": "\r", "t": "\t", "b": "\b",
+                 "a": "\a", "f": "\f", "v": "\v", "`": "`",
+                 '"': '"', "'": "'", ";": ";", ",": ",", "%": "%",
+                 " ": " "}
+        out = []
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "`" and i + 1 < len(text):
+                nxt = text[i + 1]
+                out.append(table.get(nxt, nxt))
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
     def _interp(self, text: str) -> str:
+        text = self._unescape_ahk(str(text))
+
         def rep(m):
             return str(self.vars.get(m.group(1), m.group(0)))
-        return re.sub(r"\{(\w+)\}", rep, str(text))
+        return re.sub(r"\{(\w+)\}", rep, text)
 
     def _cond(self, cond: str) -> bool:
         cond = str(cond).strip()
