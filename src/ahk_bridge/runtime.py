@@ -204,6 +204,8 @@ class Runtime:
         # -- GUI surface (v0.6) --
         self._guis: list = []
         self._pending_abort: Aborted | None = None
+        # -- OS bridge (v0.7) --
+        self._clipboard_loaded = False
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
 
     # -- built-in variables --
@@ -1200,7 +1202,7 @@ class Runtime:
             # Our vars are function-global already; static persists too.
             # `global Name := value` still has to perform the initialization.
             for name, raw in getattr(st, "initializers", []) or []:
-                self.vars[name] = self._eval_expr(raw)
+                self._set_var(name, self._eval_expr(raw))
         elif isinstance(st, P.Setting):
             name = st.name.lower()
             if name == "setworkingdir":
@@ -1228,7 +1230,7 @@ class Runtime:
         elif isinstance(st, P.IniOp):
             self._ini(st)
         elif isinstance(st, P.Assign):
-            self.vars[st.name] = self._eval_expr(st.value)
+            self._set_var(st.name, self._eval_expr(st.value))
         elif isinstance(st, P.AssignTarget):
             self._assign_target(st.target, st.value)
         elif isinstance(st, P.DynCall):
@@ -1260,26 +1262,26 @@ class Runtime:
             val = self._eval_expr(st.value)
             try:
                 if st.op == "+=":
-                    self.vars[name] = self._numval(cur) + self._numval(val)
+                    self._set_var(name, self._numval(cur) + self._numval(val))
                 elif st.op == "-=":
-                    self.vars[name] = self._numval(cur) - self._numval(val)
+                    self._set_var(name, self._numval(cur) - self._numval(val))
                 elif st.op == "*=":
-                    self.vars[name] = self._numval(cur) * self._numval(val)
+                    self._set_var(name, self._numval(cur) * self._numval(val))
                 elif st.op in ("//=", "/="):
                     d = self._numval(val)
-                    self.vars[name] = (self._numval(cur) // d) if st.op == "//=" else (self._numval(cur) / d)
+                    self._set_var(name, (self._numval(cur) // d) if st.op == "//=" else (self._numval(cur) / d))
                 elif st.op == ".=":
-                    self.vars[name] = str(cur) + str(val)
+                    self._set_var(name, str(cur) + str(val))
                 elif st.op in ("|=", "&="):
                     a, b = int(self._numval(cur)), int(self._numval(val))
-                    self.vars[name] = (a | b) if st.op == "|=" else (a & b)
+                    self._set_var(name, (a | b) if st.op == "|=" else (a & b))
             except (TypeError, ValueError, ZeroDivisionError):
-                self.vars[name] = val if st.op == ".=" else cur
+                self._set_var(name, val if st.op == ".=" else cur)
         elif isinstance(st, P.IncDec):
             try:
-                self.vars[st.name] = self._numval(self.vars.get(st.name, 0)) + st.delta
+                self._set_var(st.name, self._numval(self.vars.get(st.name, 0)) + st.delta)
             except (TypeError, ValueError):
-                self.vars[st.name] = st.delta
+                self._set_var(st.name, st.delta)
         elif isinstance(st, P.Seq):
             for sub in st.items:
                 self._check()
@@ -1788,6 +1790,33 @@ class Runtime:
         if message not in self._stub_warned:
             self._stub_warned.add(message)
             self.logs.append(message)
+
+    def _get_var(self, name: str):
+        """Read a variable, lazily loading the real system clipboard.
+
+        ``A_Clipboard`` is special in AHK.  Read it once on first use so a
+        user's existing clipboard is visible, but never overwrite a value the
+        script has just assigned (that would race the external helper).
+        """
+        if name == "A_Clipboard" and not self._clipboard_loaded:
+            from . import clipboard as _clipboard
+            self.vars[name] = _clipboard.read_text()
+            self._clipboard_loaded = True
+        return self.vars.get(name, "")
+
+    def _set_var(self, name: str, value):
+        if name == "A_Clipboard":
+            from . import clipboard as _clipboard
+            try:
+                ok = _clipboard.write_text(value)
+            except Exception:
+                ok = False
+            self._clipboard_loaded = True
+            if not ok:
+                self._log_once(
+                    "clipboard: no wl-copy/xclip/xsel helper; "
+                    "A_Clipboard kept in-script only (logged)")
+        self.vars[name] = value
 
     def _pure_builtin(self, low: str, args: list):
         """Side-effect-free builtins usable inside expressions. Unknown GUI/OS
@@ -2695,7 +2724,7 @@ class Runtime:
                 break
             target = target[:m.start()] + str(self.vars.get(m.group(1), "")) + target[m.end():]
         if re.fullmatch(r"[A-Za-z_]\w*", target.strip()):
-            self.vars[target.strip()] = val
+            self._set_var(target.strip(), val)
             return
         m = re.match(r"^([A-Za-z_]\w*)(.*)$", target.strip(), re.DOTALL)
         if not m:
@@ -2936,7 +2965,7 @@ class Runtime:
         else:
             target = text
         if re.fullmatch(r'[A-Za-z_]\w*', target):
-            self.vars[target] = value
+            self._set_var(target, value)
 
     def _split_path_builtin(self, args):
         path = self._eval_assignment_arg(args[0]) if args and args[0].strip() else ""
@@ -3381,12 +3410,12 @@ class Runtime:
             return self._rng.randint(lo, hi)
         # bare var
         if re.match(r"^[A-Za-z_]\w*$", s) and s in self.vars:
-            return self.vars[s]
+            return self._get_var(s)
         # chained assignment in expressions: x := y := 5
         m = re.match(r"^([A-Za-z_]\w*)\s*:=\s*(.+)$", s, re.DOTALL)
         if m:
             val = self._eval_expr(m.group(2).strip())
-            self.vars[m.group(1)] = val
+            self._set_var(m.group(1), val)
             return val
         # complex assignment in an expression: obj.prop := v, arr[i] := v,
         # (ctrl := Gui.Add(...)).Section := "Gather".
@@ -4021,8 +4050,8 @@ class Runtime:
         # assignment-in-condition: (attr := FileExist(f)) -> assign + test
         m = re.match(r"^([A-Za-z_]\w*)\s*:=\s*(.+)$", cond)
         if m:
-            self.vars[m.group(1)] = self._eval_expr(m.group(2).strip())
-            return self._truthy(self.vars[m.group(1)])
+            self._set_var(m.group(1), self._eval_expr(m.group(2).strip()))
+            return self._truthy(self._get_var(m.group(1)))
         # regex match: haystack ~= "pattern" (AHK options like i)xxx) convert)
         m = re.match(r"^(.+?)\s*~=\s*(.+)$", cond, re.DOTALL)
         if m:
