@@ -74,6 +74,100 @@ def test_block_arrow_function_does_not_leak_enclosing_body():
     assert sc.functions["Foo"].body[1].name == "Bar"
 
 
+def test_if_allman_block_keeps_trailing_function_statements():
+    # Natro's mp_MPlanterGatherSwitch_ has an `if (...) {` whose body starts
+    # on the next line and an inner `} else {`.  The else must attach to the
+    # inner if; otherwise the outer block closes early and the rest of the
+    # function (including the final call) leaks into the auto section.
+    text = (
+        "Gather() {\n"
+        "  if (enabled) {\n"
+        '    if (MsgBox("\n'
+        "    (\n"
+        "    warning text\n"
+        '    )", "WARNING!", 1) = "Ok")\n'
+        "    {\n"
+        "      choice := 1\n"
+        "    } else {\n"
+        "      choice := 0\n"
+        "    }\n"
+        "  }\n"
+        "  SaveConfig()\n"
+        "}\n"
+    )
+    sc = parse_script(text)
+    assert sc.auto_section == []
+    assert [type(n).__name__ for n in sc.functions["Gather"].body] == [
+        "If", "FuncCall"]
+    assert sc.functions["Gather"].body[1].name == "SaveConfig"
+
+
+def test_multiline_continuation_does_not_leak_into_auto():
+    # Gdip_PixelateBitmap assigns MCode as a multiline continuation string.
+    # Its literal hex/`else` lines used to close the wrong block and leak the
+    # rest of the Gdip function into the auto section.
+    text = (
+        "Pixelate() {\n"
+        "  if (outer) {\n"
+        "    if (A_PtrSize != 8)\n"
+        '      code := "\n'
+        "      (LTrim Join\n"
+        "      558BEC83EC3C8B4514\n"
+        '      )"\n'
+        "    else\n"
+        '      code := "\n'
+        "      (Join\n"
+        "      4489442418488954\n"
+        '      )"\n'
+        "    After()\n"
+        "  }\n"
+        "  Tail()\n"
+        "}\n"
+    )
+    sc = parse_script(text)
+    assert sc.auto_section == []
+    body = sc.functions["Pixelate"].body
+    assert [type(n).__name__ for n in body] == ["If", "FuncCall"]
+    assert body[-1].name == "Tail"
+    outer = body[0]
+    assert [type(n).__name__ for n in outer.then_body] == [
+        "If", "FuncCall"]
+    assert outer.then_body[-1].name == "After"
+
+
+def test_or_continuation_keeps_following_if_body():
+    # Gdip_ImageSearch uses `If cond` / `OR ...` continuation lines.
+    text = (
+        "Find() {\n"
+        "  If First()\n"
+        "  OR Second()\n"
+        "  OR Third()\n"
+        "    Return -1\n"
+        "  After()\n"
+        "}\n"
+    )
+    sc = parse_script(text)
+    assert sc.auto_section == []
+    body = sc.functions["Find"].body
+    assert [type(n).__name__ for n in body] == ["If", "FuncCall"]
+    assert "OR" in body[0].cond
+    assert body[-1].name == "After"
+
+
+def test_top_level_return_stops_auto_but_keeps_later_functions():
+    sc = parse_script(
+        "before := 1\n"
+        "return\n"
+        "leaked()\n"
+        "After() {\n"
+        "  return 2\n"
+        "}\n"
+    )
+    assert [type(n).__name__ for n in sc.auto_section] == ["Assign"]
+    assert sc.auto_section[0].name == "before"
+    assert "After" in sc.functions
+
+
 def test_block_arrow_function_is_hoisted_for_includes():
     sc = parse_logical_lines([
         "Foo() {",

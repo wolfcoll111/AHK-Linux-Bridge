@@ -178,6 +178,17 @@ def test_natro_main_include_tree_expands():
     assert not any(type(x).__name__ == "Include" for x in sc.auto_section)
     assert not any(type(x).__name__ == "Include"
                    for fn in sc.functions.values() for x in fn.body)
+    # The top-level `return` at natro_macro.ahk:3573 ends auto-execute.
+    # No function body or main-loop line after it may leak into auto.
+    main_auto = [
+        getattr(node, "_source", (None, 0))[1]
+        for node in sc.auto_section
+        if (getattr(node, "_source", (None, ""))[0] or "").endswith(
+            "natro_macro.ahk")]
+    assert main_auto
+    assert max(main_auto) <= 3573
+    assert not (set(main_auto) & {6615, 6901, 11032, 13723, 14228})
+    assert "nm_Start" in sc.functions
     assert len(ex.files) >= 30
     # The corpus loader is part of the CLI startup path; keep it bounded.
     assert elapsed < 10.0

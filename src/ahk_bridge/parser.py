@@ -1134,9 +1134,18 @@ def _parse_else_tail(lines: list[str], i: int, then_closed: bool = False,
     m = ELSEIF_RE.match(code)
     if m:
         cond = m.group(1).strip()
-        then_body, i, closed = _body_after_opener(lines, i + 1, _has_brace(code))
+        # `} Else If cond` + `{` on the next line is still a brace body.
+        # The old `braceless=not _has_brace(code)` made its following
+        # `} Else If` look like the enclosing block's follower, truncating
+        # long if/else-if chains (Gdip_CreateEffect).
+        next_code = _skip_blank(lines, i + 1)
+        braced_body = (_has_brace(code)
+                       or (next_code < len(lines)
+                           and lines[next_code].lstrip().startswith("{")))
+        then_body, i, closed = _body_after_opener(
+            lines, i + 1, _has_brace(code))
         tail, i = _parse_else_tail(lines, i, closed,
-                                    braceless=not _has_brace(code))
+                                    braceless=not braced_body)
         return [If(cond, then_body, tail)], i
     if ELSE_RE.match(code):
         return _parse_block(lines, i + 1)[:2]
@@ -1362,8 +1371,17 @@ def _parse_case_statement(lines: list[str], i: int):
         return If(m.group(1).strip(), then_body, tail), i
     m = IF_SINGLE_RE.match(code)
     if m and not _has_brace(code):
+        # An Allman block (`if x` newline `{`) is a brace body, not a
+        # braceless single statement.  Passing braceless=True here made a
+        # following `} else {` look like the *enclosing* block's else and
+        # closed the wrong block, leaking the rest of the function into the
+        # auto-execute section (Natro's mp_MPlanterGatherSwitch_).
+        next_code = _skip_blank(lines, i + 1)
+        braced_body = (next_code < len(lines)
+                       and lines[next_code].lstrip().startswith("{"))
         body, i, closed = _parse_single_or_block(lines, i + 1)
-        tail, i = _parse_else_tail(lines, i, closed, braceless=True)
+        tail, i = _parse_else_tail(lines, i, closed,
+                                   braceless=not braced_body)
         return If(m.group(1).strip(), body, tail), i
     m = SWITCH_RE.match(code)
     if m:
@@ -1649,6 +1667,7 @@ def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
             sc.requires = ln.strip()
             break
     i, n = 0, len(lines)
+    auto_done = False
     cur_hotkey: Hotkey | None = None
     while i < n:
         raw = lines[i]
@@ -1686,7 +1705,13 @@ def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
             continue
         mret = re.match(r'(?i)^return\b\s*(.*)$', s)
         if mret:
-            i += 1  # top-level return: end of auto-execute section
+            # A top-level return ends the auto-execute section but does not
+            # end the file: later function definitions still have to be
+            # registered (and are callable from hotkeys/timers).  Statements
+            # after the return are dead at load time; parse them only so
+            # nested/hoisted definitions remain visible.
+            auto_done = True
+            i += 1
             continue
         node, ni = _parse_case_statement(lines, i)
         if node is not None:
@@ -1697,8 +1722,10 @@ def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
                     pass
             if isinstance(node, FuncDef):
                 sc.functions[node.name] = node
-            else:
+            elif not auto_done:
                 sc.auto_section.append(node)
+            else:
+                _hoist_nested_functions(sc, [node])
             i = ni
             continue
         st = parse_statement(raw)
@@ -1708,7 +1735,8 @@ def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
                     st._source = source_map[i]
                 except Exception:
                     pass
-            sc.auto_section.append(st)
+            if not auto_done:
+                sc.auto_section.append(st)
         i += 1
     return sc
 
@@ -1816,7 +1844,8 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
 
     cont_q = None
     in_block_comment = False
-    for lineno, ln in enumerate(text.splitlines(), 1):
+    physical = text.splitlines()
+    for lineno, ln in enumerate(physical, 1):
         s = ln.strip()
         if in_block_comment:
             if "*/" in s:
@@ -1827,11 +1856,14 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                 in_block_comment = True
             continue
         if not s or s.startswith(";"):
-            if buf and paren <= 0 and brack <= 0:
+            if buf and paren <= 0 and brack <= 0 and cont_q is None:
                 out.append(buf)
                 starts.append(buf_start)
                 buf = ""
                 paren = brack = 0
+            elif buf:
+                # Keep blank/comment lines inside a quoted continuation.
+                buf += " "
             if not buf:
                 out.append(ln)
                 starts.append(lineno)
@@ -1839,6 +1871,20 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
         # Quote state carries across ALL lines: multi-line strings are legal
         # (continuation sections), and balanced lines are unaffected by carry.
         code, cont_q = _strip_code(s, cont_q)
+        # A line ending in an unclosed quote followed by a continuation-section
+        # opener (`(`) starts a multi-line string.  Join the whole section into
+        # one logical line so literal text inside it (MCode hex, MsgBox prose)
+        # can never be mistaken for `else`, braces, or executable statements.
+        if not buf and cont_q is not None:
+            j = lineno
+            while j < len(physical) and not physical[j].strip():
+                j += 1
+            if j < len(physical) and physical[j].lstrip().startswith("("):
+                buf = s
+                buf_start = lineno
+                paren = code.count("(") - code.count(")")
+                brack = code.count("[") - code.count("]")
+                continue
         if buf:
             # continuing previous logical line
             if s.startswith((")", "]")):
@@ -1847,7 +1893,8 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                 buf += " " + s
             paren += code.count("(") - code.count(")")
             brack += code.count("[") - code.count("]")
-            if paren <= 0 and brack <= 0 and not _open_ends(buf):
+            if (paren <= 0 and brack <= 0 and not _open_ends(buf)
+                    and cont_q is None):
                 out.append(buf)
                 starts.append(buf_start)
                 buf = ""
@@ -1874,8 +1921,11 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                     buf = out.pop()
                     buf_start = starts.pop()
                 continue
-            if s.startswith(("&&", "||")):
-                # Leading-operator continuation (`&&`/`||` first): same rule.
+            if (s.startswith(("&&", "||"))
+                    or re.match(r'(?i)^(and|or)\b', s)):
+                # Leading-operator continuation (`&&`/`||`/`AND`/`OR`
+                # first): same rule.  Gdip_ImageSearch writes a multi-line
+                # `If ...` with `OR !(...)` on its own lines.
                 combined = out[-1] + " " + s
                 out[-1] = combined
                 paren = code.count("(") - code.count(")")
