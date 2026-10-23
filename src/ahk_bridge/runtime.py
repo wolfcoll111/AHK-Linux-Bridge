@@ -206,6 +206,7 @@ class Runtime:
         self._pending_abort: Aborted | None = None
         # -- OS bridge (v0.7) --
         self._clipboard_loaded = False
+        self._active_gui = None
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
 
     # -- built-in variables --
@@ -1556,8 +1557,33 @@ class Runtime:
             self.logs.append("MsgBox: " + self._interp(str(c.args[0])))
             return ""
         if low == "winactivate" and c.args:
-            self._win_activate(str(c.args[0]))
-            return ""
+            return self._win_activate_value(self._window_arg(c.args[0], ""))
+        if low == "wingetpos":
+            return self._win_get_pos(c.args, client=False)
+        if low == "wingetclientpos":
+            return self._win_get_pos(c.args, client=True)
+        if low == "wingettitle":
+            return self._win_get_title(c.args)
+        if low == "winexist":
+            return self._win_exist(c.args)
+        if low == "wingetcount":
+            return self._win_get_count(c.args)
+        if low in ("winclose", "winkill"):
+            return self._win_close(c.args, kill=(low == "winkill"))
+        if low == "winmove":
+            return self._win_move(c.args)
+        if low == "winsettransparent":
+            return self._win_set_transparent(c.args)
+        if low == "wingetpid":
+            return self._win_get_pid(c.args)
+        if low == "wingetprocessname":
+            return self._win_get_process_name(c.args)
+        if low == "controlgetpos":
+            return self._control_get_pos(c.args)
+        if low == "controlgettext":
+            return self._control_get_text(c.args)
+        if low == "controlgethwnd":
+            return self._control_get_hwnd(c.args)
         return self._pure_builtin(low, c.args)
 
     def _image_search(self, args: list):
@@ -1817,6 +1843,411 @@ class Runtime:
                     "clipboard: no wl-copy/xclip/xsel helper; "
                     "A_Clipboard kept in-script only (logged)")
         self.vars[name] = value
+
+    # -- Windows and controls (v0.7) -------------------------------------
+    def _window_arg(self, raw, default=""):
+        """Evaluate an AHK WinTitle/control argument without leaking errors."""
+        text = str(raw or "").strip()
+        if not text:
+            return default
+        try:
+            return self._eval_expr(text)
+        except Exception:
+            return default
+
+    def _own_handle(self, hwnd: int):
+        for gui in reversed(self._guis):
+            if gui.hwnd == hwnd:
+                if getattr(gui, "destroyed", False):
+                    return None
+                return {"kind": "gui", "gui": gui, "control": None,
+                        "hwnd": gui.hwnd, "title": gui.title}
+            for control in gui.controls:
+                if control.hwnd == hwnd:
+                    if getattr(gui, "destroyed", False):
+                        return None
+                    return {"kind": "control", "gui": gui,
+                            "control": control, "hwnd": control.hwnd,
+                            "title": gui.title}
+        return None
+
+    def _resolve_window(self, value):
+        """Resolve an AHK WinTitle (or a Gui/GuiControl object) to a target.
+
+        Own Gui windows are authoritative.  X11/XWayland windows are looked
+        up through ``xdotool``; native Wayland surfaces have no global handle
+        and deliberately return None (the caller logs the exact limitation).
+        """
+        if value is not None and not isinstance(value, str):
+            if hasattr(value, "gui") and hasattr(value, "hwnd"):
+                gui = value.gui
+                if getattr(gui, "destroyed", False):
+                    return None
+                return {"kind": "control", "gui": gui, "control": value,
+                        "hwnd": getattr(value, "hwnd", 0),
+                        "title": getattr(gui, "title", "")}
+            if hasattr(value, "controls") and hasattr(value, "hwnd"):
+                if getattr(value, "destroyed", False):
+                    return None
+                return {"kind": "gui", "gui": value, "control": None,
+                        "hwnd": getattr(value, "hwnd", 0),
+                        "title": getattr(value, "title", "")}
+            try:
+                value = str(int(value))
+            except (TypeError, ValueError):
+                value = str(value)
+
+        text = str(value or "").strip()
+        if text.lower().startswith("ahk_id "):
+            token = text[7:].strip().strip('"')
+            try:
+                hwnd = int(token, 0)
+            except (TypeError, ValueError):
+                hwnd = 0
+            if not hwnd:
+                return None
+            own = self._own_handle(hwnd)
+            if own is not None:
+                return own
+            from . import window_ops
+            if window_ops.geometry(hwnd):
+                return {"kind": "external", "gui": None, "control": None,
+                        "hwnd": hwnd, "title": window_ops.title(hwnd)}
+            self._log_once(
+                f"window ahk_id {hwnd} not found (X11/XWayland limit; "
+                "native Wayland surfaces have no HWND)")
+            return None
+
+        if text in ("", "A"):
+            active = getattr(self, "_active_gui", None)
+            if active is not None and not getattr(active, "destroyed", False):
+                return {"kind": "gui", "gui": active, "control": None,
+                        "hwnd": active.hwnd, "title": active.title}
+            for gui in reversed(self._guis):
+                if not gui.destroyed and gui.visible:
+                    return {"kind": "gui", "gui": gui, "control": None,
+                            "hwnd": gui.hwnd, "title": gui.title}
+            return None
+
+        low = text.lower()
+        # `ahk_class AutoHotkeyGUI` identifies one of our Gui windows.  A
+        # leading title phrase is matched as a case-insensitive substring,
+        # mirroring AHK's default title matching.
+        class_own = "ahk_class autohotkeygui" in low
+        phrase = re.split(r"\s+ahk_(?:exe|class|pid|group)\b", text,
+                          flags=re.IGNORECASE)[0].strip().strip('"')
+        for gui in reversed(self._guis):
+            if gui.destroyed:
+                continue
+            if class_own or (phrase and phrase.lower() in gui.title.lower()):
+                return {"kind": "gui", "gui": gui, "control": None,
+                        "hwnd": gui.hwnd, "title": gui.title}
+
+        from . import window_ops
+        if phrase:
+            hwnd = window_ops.find(text)
+            if hwnd:
+                return {"kind": "external", "gui": None, "control": None,
+                        "hwnd": hwnd, "title": window_ops.title(hwnd)}
+        self._log_once(
+            f"window {text!r} not found (X11/XWayland helper or native "
+            "Wayland surface; no HWND)")
+        return None
+
+    def _window_rect(self, target, client: bool = False):
+        if target is None:
+            return (0, 0, 0, 0)
+        gui = target.get("gui")
+        control = target.get("control")
+        if gui is not None:
+            if control is not None:
+                return self._control_rect(gui, control, screen=True)
+            widget = getattr(gui, "widget", None)
+            if widget is None:
+                return (0, 0, 200, 200)
+            if client:
+                try:
+                    from PySide6.QtCore import QPoint
+                    point = widget.mapToGlobal(QPoint(0, 0))
+                    return (point.x(), point.y(),
+                            widget.width(), widget.height())
+                except Exception:
+                    pass
+            geom = widget.frameGeometry()
+            return (geom.x(), geom.y(), geom.width(), geom.height())
+        from . import window_ops
+        return window_ops.geometry(int(target.get("hwnd", 0)),
+                                   client=client) or (0, 0, 0, 0)
+
+    def _control_rect(self, gui, control, screen: bool = True):
+        widget = getattr(control, "widget", None)
+        if widget is None or getattr(gui, "widget", None) is None:
+            return (getattr(control, "_x", 0), getattr(control, "_y", 0),
+                    getattr(control, "_w", 0), getattr(control, "_h", 0))
+        try:
+            from PySide6.QtCore import QPoint
+            if screen:
+                point = widget.mapToGlobal(QPoint(0, 0))
+            else:
+                point = widget.mapTo(gui.widget, QPoint(0, 0))
+            return (point.x(), point.y(), widget.width(), widget.height())
+        except Exception:
+            return (getattr(control, "_x", 0), getattr(control, "_y", 0),
+                    getattr(control, "_w", 0), getattr(control, "_h", 0))
+
+    def _find_control(self, control_value, window_value=""):
+        """Resolve a control object, name, `ahk_id`, or ClassNN."""
+        if control_value is not None and hasattr(control_value, "gui") \
+                and hasattr(control_value, "hwnd"):
+            return control_value.gui, control_value
+        text = str(control_value or "").strip().strip('"')
+        if not text:
+            return None
+        if text.lower().startswith("ahk_id "):
+            try:
+                hwnd = int(text[7:].strip(), 0)
+            except (TypeError, ValueError):
+                return None
+            own = self._own_handle(hwnd)
+            if own and own.get("control") is not None:
+                return own["gui"], own["control"]
+            return None
+        if re.fullmatch(r"\d+", text):
+            own = self._own_handle(int(text))
+            if own and own.get("control") is not None:
+                return own["gui"], own["control"]
+            return None
+
+        target = self._resolve_window(
+            self._window_arg(window_value, "") if str(window_value).strip()
+            else "A")
+        if target is None or target.get("gui") is None:
+            self._log_once(
+                f"ControlGet*: window {window_value!r} has no accessible "
+                "child controls on this Linux surface (logged)")
+            return None
+        gui = target["gui"]
+        direct = gui._by_name.get(text.lower())
+        if direct is not None:
+            return gui, direct
+        m = re.fullmatch(
+            r"(?i)(Static|Button|Edit|ComboBox|msctls_updown32|"
+            r"SysTabControl32|msctls_trackbar32|msctls_hotkey32)(\d+)",
+            text)
+        if m:
+            class_name, index = m.group(1).lower(), int(m.group(2))
+            classes = {
+                "static": {"Text", "Picture"},
+                "button": {"Button", "CheckBox", "GroupBox"},
+                "edit": {"Edit"},
+                "combobox": {"DDL"},
+                "msctls_updown32": {"UpDown"},
+                "systabcontrol32": {"Tab"},
+                "msctls_trackbar32": {"Slider"},
+                "msctls_hotkey32": {"Hotkey"},
+            }
+            wanted = classes.get(class_name, set())
+            if index > 0:
+                seen = 0
+                for control in gui.controls:
+                    if control.type in wanted:
+                        seen += 1
+                        if seen == index:
+                            return gui, control
+        self._log_once(f"control {text!r} not found (logged)")
+        return None
+
+    def _win_get_pos(self, args, client=False):
+        raw_title = args[4] if len(args) > 4 else ""
+        target = self._resolve_window(self._window_arg(raw_title, ""))
+        rect = self._window_rect(target, client=client)
+        for index, value in enumerate(rect):
+            if index < len(args):
+                self._assign_output(args[index], value)
+        return 1 if target is not None else 0
+
+    def _win_get_title(self, args):
+        raw = args[0] if args else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        return target.get("title", "") if target else ""
+
+    def _win_exist(self, args):
+        raw = args[0] if args else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        return int(target.get("hwnd", 0)) if target else 0
+
+    def _win_get_count(self, args):
+        raw = self._window_arg(args[0], "") if args else ""
+        if not str(raw or "").strip():
+            return 1 if self._resolve_window("A") else 0
+        target = self._resolve_window(raw)
+        if target is not None and target.get("gui") is not None:
+            return 1
+        from . import window_ops
+        return len(window_ops.find_all(str(raw)))
+
+    def _win_close(self, args, kill=False):
+        raw = args[0] if args else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        if target is None:
+            return 0
+        gui = target.get("gui")
+        if gui is not None:
+            if kill:
+                gui._destroy()
+            else:
+                gui._close()
+                # WM_CLOSE destroys a normal window.  A Close handler that
+                # requested ExitApp is handled by _close()/the runtime; a
+                # plain hidden Gui is not a live window for WinExist().
+                if not gui.destroyed and self._pending_abort is None:
+                    gui._destroy()
+            return 1
+        from . import window_ops
+        return 1 if window_ops.close(int(target["hwnd"]), kill=kill) else 0
+
+    def _win_move(self, args):
+        if len(args) < 2:
+            return 0
+        try:
+            x = int(self._window_arg(args[0], 0))
+            y = int(self._window_arg(args[1], 0))
+        except (TypeError, ValueError):
+            return 0
+        raw = args[2] if len(args) > 2 else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        if target is None:
+            return 0
+        gui = target.get("gui")
+        if gui is not None:
+            widget = getattr(gui, "widget", None)
+            if widget is not None:
+                widget.move(x, y)
+            return 1
+        from . import window_ops
+        return 1 if window_ops.move(int(target["hwnd"]), x, y) else 0
+
+    def _win_set_transparent(self, args):
+        if not args:
+            return 0
+        try:
+            alpha = int(float(self._window_arg(args[0], 255)))
+        except (TypeError, ValueError):
+            alpha = 255
+        raw = args[1] if len(args) > 1 else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        if target is None:
+            return 0
+        gui = target.get("gui")
+        if gui is not None:
+            widget = getattr(gui, "widget", None)
+            if widget is not None:
+                widget.setWindowOpacity(max(0.0, min(1.0, alpha / 255.0)))
+            return 1
+        from . import window_ops
+        return 1 if window_ops.set_opacity(int(target["hwnd"]), alpha) else 0
+
+    def _win_get_pid(self, args):
+        raw = args[0] if args else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        if target is None:
+            return 0
+        if target.get("gui") is not None:
+            import os as _os
+            return _os.getpid()
+        from . import window_ops
+        return window_ops.pid(int(target["hwnd"]))
+
+    def _win_get_process_name(self, args):
+        raw = args[0] if args else ""
+        target = self._resolve_window(self._window_arg(raw, ""))
+        if target is None:
+            return ""
+        if target.get("gui") is not None:
+            import os as _os
+            return _os.path.basename(_os.path.abspath(_os.sys.argv[0]))
+        from . import window_ops
+        return window_ops.process_name(int(target["hwnd"]))
+
+    def _control_get_pos(self, args):
+        control_raw = args[4] if len(args) > 4 else ""
+        win_raw = args[5] if len(args) > 5 else ""
+        found = self._find_control(
+            self._window_arg(control_raw, ""), win_raw)
+        if found is None:
+            rect = (0, 0, 0, 0)
+        else:
+            gui, control = found
+            rect = self._control_rect(gui, control, screen=False)
+        for index, value in enumerate(rect):
+            if index < len(args):
+                self._assign_output(args[index], value)
+        return 1 if found else 0
+
+    def _control_get_text(self, args):
+        control_raw = args[0] if args else ""
+        win_raw = args[1] if len(args) > 1 else ""
+        found = self._find_control(
+            self._window_arg(control_raw, ""), win_raw)
+        return found[1].get_text() if found else ""
+
+    def _control_get_hwnd(self, args):
+        control_raw = args[0] if args else ""
+        win_raw = args[1] if len(args) > 1 else ""
+        found = self._find_control(
+            self._window_arg(control_raw, ""), win_raw)
+        return found[1].hwnd if found else 0
+
+    def _win_activate_value(self, value):
+        target = self._resolve_window(value)
+        gui = target.get("gui") if target else None
+        if gui is not None:
+            widget = getattr(gui, "widget", None)
+            if widget is not None:
+                gui._show("")
+                widget.raise_()
+                widget.activateWindow()
+            self._active_gui = gui
+            return 1
+        self._win_activate(str(value or ""))
+        return 1
+
+    def _legacy_window(self, low: str, rest: str) -> bool:
+        parts = [p.strip() for p in P._split_seq(rest)]
+        if parts and parts[0] == "":
+            parts = parts[1:]
+        if low == "wingetpos":
+            self._win_get_pos(parts, client=False)
+            return True
+        if low == "wingetclientpos":
+            self._win_get_pos(parts, client=True)
+            return True
+        if low == "wingettitle":
+            if len(parts) >= 2:
+                self._assign_output(parts[0], self._win_get_title([parts[1]]))
+            else:
+                self._log_once("WinGetTitle: missing output/window (logged)")
+            return True
+        if low in ("winclose", "winkill"):
+            self._win_close([parts[0] if parts else ""],
+                            kill=(low == "winkill"))
+            return True
+        if low == "winmove":
+            self._win_move(parts[:3])
+            return True
+        if low == "winsettransparent":
+            self._win_set_transparent(parts[:2])
+            return True
+        if low == "controlgetpos":
+            self._control_get_pos(parts[:6])
+            return True
+        if low == "controlgettext":
+            if len(parts) >= 2:
+                self._assign_output(
+                    parts[0], self._control_get_text([parts[1],
+                                                      parts[2] if len(parts) > 2 else ""]))
+            return True
+        return False
 
     def _pure_builtin(self, low: str, args: list):
         """Side-effect-free builtins usable inside expressions. Unknown GUI/OS
@@ -2877,6 +3308,11 @@ class Runtime:
         if low in ("reload", "edit", "listvars", "keyhistory", "exit"):
             self.logs.append(f"{st.name} {rest} (noted, linux no-op)")
             return
+        if low in ("wingetpos", "wingetclientpos", "wingettitle",
+                   "winclose", "winkill", "winmove", "winsettransparent",
+                   "controlgetpos", "controlgettext"):
+            if self._legacy_window(low, rest):
+                return
         if low == "splitpath":
             parts = [p.strip() for p in P._split_seq(rest)]
             path = self._eval_assignment_arg(parts[0]) if parts else ""

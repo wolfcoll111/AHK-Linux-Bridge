@@ -445,6 +445,8 @@ def _is_bare_index_read(s: str) -> bool:
 
 _EMPTY_ARG_METHODS = {
     "add", "move", "getpos", "opt", "setfont", "show", "onevent", "usetab",
+    # Positional output slots: WinGetPos(&x, &y, , , win) keeps its holes.
+    "wingetpos", "wingetclientpos", "controlgetpos",
 }
 
 

@@ -1189,6 +1189,8 @@ class Gui:
     def _show(self, options=""):
         mods = _load_qt()
         self.visible = True
+        # WinExist("A") / WinGetPos(..., "A") target the last shown Gui.
+        self.runtime._active_gui = self
         if self.widget is None or mods is None:
             return ""
         QtCore, _QtGui, QtWidgets = mods
