@@ -250,6 +250,25 @@ def test_fileopen_file_object_roundtrip(tmp_path):
     assert not any("stub builtin fileopen" in line for line in rt.logs)
 
 
+def test_fileopen_rawread_and_pos(tmp_path):
+    base = str(tmp_path).replace("\\", "/")
+    (tmp_path / "raw.bin").write_bytes(bytes([0xDE, 0xAD, 0xBE, 0xEF]))
+    sc, rt, sim = run(
+        f'f := FileOpen("{base}/raw.bin", "r")\n'
+        'buf := Buffer(4, 0)\n'
+        'n := f.RawRead(buf, 4)\n'
+        'first := NumGet(buf, 0, "UChar")\n'
+        "f.Pos := 0\n"
+        'n2 := f.RawRead(buf, 2)\n'
+        'second := NumGet(buf, 1, "UChar")\n'
+        "f.Close()\n")
+    rt.run_auto()
+    assert rt.vars["n"] == 4
+    assert rt.vars["first"] == 0xDE
+    assert rt.vars["n2"] == 2
+    assert rt.vars["second"] == 0xAD
+
+
 def test_file_builtins_and_relative_working_directory(tmp_path):
     base = str(tmp_path)
     text = (

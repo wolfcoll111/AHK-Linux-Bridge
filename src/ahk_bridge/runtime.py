@@ -6,6 +6,7 @@ Loop/Sleep var resolution, {Key} send-sequences, live PixelSearch + WinActivate.
 from __future__ import annotations
 import ast
 import datetime as _dt
+import hashlib
 import json
 import os
 import queue
@@ -165,8 +166,19 @@ class AhkFile:
         else:
             self._fh = open(path, py_mode, encoding=self.encoding,
                             newline="")
+        # HashFile uses RawRead to feed the OS crypto API.  Keep a separate
+        # binary handle so text decoding (and its BOM handling) cannot change
+        # the bytes being hashed.
+        self._bfh = None
+        self._raw_pos = 0
 
     # -- File object API -------------------------------------------------
+    def _binary_handle(self):
+        if self._bfh is None or self._bfh.closed:
+            self._bfh = open(self.path, "rb")
+            self._bfh.seek(self._raw_pos)
+        return self._bfh
+
     def ahk_dispatch(self, method: str, raw_args: list, runtime):
         m = method.lower()
         if self.closed:
@@ -214,6 +226,32 @@ class AhkFile:
             except (OSError, ValueError) as exc:
                 runtime._log_once(f"File.Seek failed: {exc}")
                 return 0
+        if m == "rawread":
+            from . import memory
+            if not raw_args:
+                return 0
+            target = runtime._eval_expr(raw_args[0])
+            try:
+                count = (int(runtime._eval_expr(raw_args[1]))
+                         if len(raw_args) > 1 else 0)
+            except (TypeError, ValueError):
+                count = 0
+            buf, base = memory.resolve(target)
+            if buf is None:
+                runtime._log_once("File.RawRead: no Buffer target (returns 0)")
+                return 0
+            try:
+                data = self._binary_handle().read(
+                    count if count > 0 else buf.size - base)
+            except OSError as exc:
+                runtime._log_once(f"File.RawRead failed: {exc}")
+                return 0
+            if count <= 0:
+                count = len(data)
+            data = data[:max(0, min(count, buf.size - base))]
+            buf.data[base:base + len(data)] = data
+            self._raw_pos = self._binary_handle().tell()
+            return len(data)
         if m == "close":
             self.close()
             return 1
@@ -222,6 +260,27 @@ class AhkFile:
             return ""
         runtime._log_once(f"File.{method}() unsupported (logged)")
         return ""
+
+    def ahk_set_property(self, name: str, value):
+        prop = str(name).lower()
+        if prop in ("pos", "position"):
+            try:
+                pos = int(value)
+            except (TypeError, ValueError):
+                pos = 0
+            self._raw_pos = max(0, pos)
+            try:
+                self._fh.seek(pos)
+            except (OSError, ValueError):
+                pass
+            if self._bfh is not None and not self._bfh.closed:
+                try:
+                    self._bfh.seek(self._raw_pos)
+                except (OSError, ValueError):
+                    pass
+            return 1
+        self.runtime._log_once(f"File.{name} property unsupported (logged)")
+        return 0
 
     def ahk_get_property(self, name: str):
         prop = str(name).lower()
@@ -239,6 +298,11 @@ class AhkFile:
         if prop == "pos":
             if self.closed:
                 return 0
+            if self._bfh is not None and not self._bfh.closed:
+                try:
+                    return self._bfh.tell()
+                except (OSError, ValueError):
+                    return self._raw_pos
             try:
                 return self._fh.tell()
             except (OSError, ValueError):
@@ -247,6 +311,12 @@ class AhkFile:
             if self.closed:
                 return 1
             try:
+                if self._bfh is not None and not self._bfh.closed:
+                    here = self._bfh.tell()
+                    self._bfh.seek(0, os.SEEK_END)
+                    end = self._bfh.tell()
+                    self._bfh.seek(here)
+                    return 1 if here >= end else 0
                 here = self._fh.tell()
                 self._fh.seek(0, os.SEEK_END)
                 end = self._fh.tell()
@@ -262,10 +332,13 @@ class AhkFile:
 
     def close(self):
         if not self.closed:
-            try:
-                self._fh.close()
-            except OSError:
-                pass
+            for attr in ("_fh", "_bfh"):
+                fh = getattr(self, attr, None)
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
             self.closed = True
 
     def __del__(self):
@@ -2653,6 +2726,12 @@ class Runtime:
             elif memory.resolve(pair["value"])[0] is not None:
                 memory.write(pair["value"], 0, pair["type"], value)
 
+        if name in {
+            "cryptacquirecontextw", "cryptacquirecontexta",
+            "cryptcreatehash", "crypthashdata", "cryptgethashparam",
+            "cryptdestroyhash", "cryptreleasecontext",
+        }:
+            return self._crypto_dll(name, pairs, value_at, assign, full_name)
         if name == "sleep":
             self.sim.sleep_ms(int(value_at(0, 0) or 0))
             return 0
@@ -2746,6 +2825,142 @@ class Runtime:
         self._log_once(
             f"DllCall {full_name}: Windows ABI not modeled on Linux "
             "(returns 0; logged)")
+        return 0
+
+    @staticmethod
+    def _ptr_value(value):
+        if isinstance(value, dict):
+            for key in ("ptr", "Ptr", "handle"):
+                if key in value:
+                    try:
+                        return int(value[key])
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _store_ptr(value, handle) -> bool:
+        if isinstance(value, dict):
+            value["ptr"] = handle
+            return True
+        return False
+
+    def _crypto_dll(self, name: str, pairs: list, value_at, assign,
+                    full_name: str):
+        """Real hashing for the Advapi32 surface used by HashFile.
+
+        This is a Linux implementation of the *effect* (MD5/SHA hashes of a
+        file), not a Windows ABI emulation.  Handles are opaque synthetic
+        values and every buffer is a bounded AhkBuffer.
+        """
+        if not hasattr(self, "_crypto_hashes"):
+            self._crypto_hashes: dict[int, object] = {}
+            self._crypto_providers: dict[int, bool] = {}
+            self._crypto_next = 0x50000000
+            self._log_once(
+                "DllCall Advapi32 CryptoAPI: bridged to Python hashlib "
+                "(Linux implementation, synthetic handles)")
+
+        def new_handle():
+            self._crypto_next += 1
+            return self._crypto_next
+
+        if name in ("cryptacquirecontextw", "cryptacquirecontexta"):
+            handle = new_handle()
+            self._crypto_providers[handle] = True
+            hprov = value_at(0)
+            if self._store_ptr(hprov, handle):
+                return 1
+            assign(0, handle)
+            return 1
+        if name == "cryptcreatehash":
+            prov = self._ptr_value(value_at(0))
+            if prov not in self._crypto_providers:
+                self._log_once("CryptCreateHash: stale provider (returns 0)")
+                return 0
+            alg = int(value_at(1, 0) or 0)
+            if alg == 32769:
+                # Python/OpenSSL does not provide MD2.  Keep the legacy slot
+                # usable but make the approximation visible.
+                self._log_once(
+                    "CryptCreateHash: MD2 unavailable; using MD5 fallback "
+                    "(logged approximation)")
+            alg_name = {
+                32769: "md5",
+                32771: "md5", 32772: "sha1", 32780: "sha256",
+                32781: "sha384", 32782: "sha512",
+            }.get(alg)
+            if not alg_name:
+                self._log_once(
+                    f"CryptCreateHash: hash algorithm {alg} not modeled "
+                    "(returns 0)")
+                return 0
+            handle = new_handle()
+            self._crypto_hashes[handle] = hashlib.new(alg_name)
+            if self._store_ptr(value_at(4), handle):
+                return 1
+            assign(4, handle)
+            return 1
+        if name == "crypthashdata":
+            h = self._ptr_value(value_at(0))
+            digest = self._crypto_hashes.get(h)
+            if digest is None:
+                self._log_once("CryptHashData: stale hash handle (returns 0)")
+                return 0
+            from . import memory
+            buf, base = memory.resolve(value_at(1))
+            try:
+                size = max(0, int(value_at(2, 0) or 0))
+            except (TypeError, ValueError):
+                size = 0
+            if buf is None:
+                # No real memory was supplied: hash nothing rather than
+                # pretending bytes were processed.
+                self._log_once("CryptHashData: no Buffer data (returns 0)")
+                return 0
+            data = bytes(buf.data[base:base + size])
+            digest.update(data)
+            return 1
+        if name == "cryptgethashparam":
+            h = self._ptr_value(value_at(0))
+            digest = self._crypto_hashes.get(h)
+            if digest is None:
+                self._log_once(
+                    "CryptGetHashParam: stale hash handle (returns 0)")
+                return 0
+            param = int(value_at(1, 0) or 0)
+            if param == 4:  # HP_HASHSIZE
+                assign(2, digest.digest_size)
+                assign(3, 4)
+                return 1
+            if param == 2:  # HP_HASHVAL
+                from . import memory
+                raw = digest.digest()
+                out, base = memory.resolve(value_at(2))
+                if out is None:
+                    self._log_once(
+                        "CryptGetHashParam: no Buffer output (returns 0)")
+                    return 0
+                end = min(out.size, base + len(raw))
+                out.data[base:end] = raw[:max(0, end - base)]
+                assign(3, len(raw))
+                return 1
+            self._log_once(
+                f"CryptGetHashParam: parameter {param} not modeled "
+                "(returns 0)")
+            return 0
+        if name == "cryptdestroyhash":
+            self._crypto_hashes.pop(self._ptr_value(value_at(0)), None)
+            return 1
+        if name == "cryptreleasecontext":
+            self._crypto_providers.pop(self._ptr_value(value_at(0)), None)
+            return 1
+        self._log_once(f"DllCall {full_name}: crypto bridge unhandled "
+                       "(returns 0)")
         return 0
 
     def _pure_builtin(self, low: str, args: list):
