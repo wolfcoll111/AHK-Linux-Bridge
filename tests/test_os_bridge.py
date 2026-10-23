@@ -214,6 +214,75 @@ def test_win_close_fires_callback_then_destroys():
         _close_guis(rt)
 
 
+def test_buffer_numput_numget_roundtrip_and_bounds():
+    rt = run(
+        'b := Buffer(32, 0)\n'
+        'NumPut("UInt", 1234, b, 4)\n'
+        'a := NumGet(b, 4, "UInt")\n'
+        'NumPut("UInt", 7, "UInt", 9, b, 8)\n'
+        'c := NumGet(b, 8, "UInt")\n'
+        'd := NumGet(b, 12, "UInt")\n'
+        'ptr := b.Ptr\n'
+        'outOfBounds := NumGet(b, 9999, "UInt")\n'
+    )
+    rt.run_auto()
+    assert rt.vars["a"] == 1234
+    assert rt.vars["c"] == 7 and rt.vars["d"] == 9
+    assert rt.vars["ptr"] == rt.vars["b"].ptr
+    assert rt.vars["outOfBounds"] == 0
+
+
+def test_strput_strget_and_strptr():
+    rt = run(
+        'n := StrPut("hello", "UTF-8")\n'
+        'buf := Buffer(n)\n'
+        'StrPut("hello", buf, n, "UTF-8")\n'
+        'roundtrip := StrGet(buf, n, "UTF-8")\n'
+        'ptr := StrPtr("world")\n'
+        'fromPtr := StrGet(ptr)\n'
+    )
+    rt.run_auto()
+    assert rt.vars["roundtrip"] == "hello"
+    assert rt.vars["fromPtr"] == "world"
+
+
+def test_dllcall_timing_sleep_pid_and_unknown_logging():
+    rt = run(
+        'ft := 0\n'
+        'DllCall("GetSystemTimeAsFileTime", "int64p", &ft := 0)\n'
+        'pid := DllCall("GetCurrentProcessId")\n'
+        'DllCall("Sleep", "UInt", 5)\n'
+        'a := DllCall("totally_missing_api")\n'
+        'b := DllCall("totally_missing_api")\n'
+    )
+    rt.run_auto()
+    import os
+    assert rt.vars["ft"] > 116444736000000000
+    assert rt.vars["pid"] == os.getpid()
+    assert ("sleep", 5) in rt.sim.log
+    assert rt.vars["a"] == 0 and rt.vars["b"] == 0
+    unknown = [line for line in rt.logs if "totally_missing_api" in line]
+    assert len(unknown) == 1
+
+
+def test_dllcall_buffer_structure_write():
+    pytest.importorskip("PySide6")
+    rt = run(
+        'MainGui := Gui("", "Placement")\n'
+        'MainGui.Show("x10 y20 w300 h200")\n'
+        'wp := Buffer(44)\n'
+        'ok := DllCall("GetWindowPlacement", "UInt", MainGui.Hwnd, "Ptr", wp)\n'
+        'x := NumGet(wp, 28, "Int")\n'
+        'y := NumGet(wp, 32, "Int")\n'
+    )
+    try:
+        rt.run_auto()
+        assert rt.vars["ok"] == 1
+        assert rt.vars["x"] != 0 or rt.vars["y"] != 0
+    finally:
+        _close_guis(rt)
+
+
 def test_missing_external_window_is_logged_and_falsy(monkeypatch):
     import ahk_bridge.window_ops as wo
 

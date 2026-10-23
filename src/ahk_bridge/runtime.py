@@ -1584,6 +1584,11 @@ class Runtime:
             return self._control_get_text(c.args)
         if low == "controlgethwnd":
             return self._control_get_hwnd(c.args)
+        if low in ("buffer", "numget", "numput", "strget", "strput",
+                   "strptr", "varptr", "objptr"):
+            return self._memory_builtin(low, c.args)
+        if low == "dllcall":
+            return self._dll_call(c.args)
         return self._pure_builtin(low, c.args)
 
     def _image_search(self, args: list):
@@ -2248,6 +2253,268 @@ class Runtime:
                                                       parts[2] if len(parts) > 2 else ""]))
             return True
         return False
+
+    # -- bounded memory / DllCall (v0.7) ----------------------------------
+    def _memory_builtin(self, low: str, args: list):
+        from . import memory
+        ev = lambda i: self._eval_expr(args[i]) if i < len(args) else ""
+
+        if low == "buffer":
+            size = ev(0) if args else 0
+            fill = ev(1) if len(args) > 1 else 0
+            return memory.AhkBuffer(size, fill)
+
+        if low == "numget":
+            if not args:
+                return 0
+            source = ev(0)
+            offset, type_name = 0, "UPtr"
+            if len(args) == 2:
+                second = str(ev(1)).strip()
+                if re.fullmatch(
+                        r"(?i)(u?char|u?short|u?int(?:8|16|32|64)?|"
+                        r"u?ptr|float|double)", second):
+                    type_name = second
+                else:
+                    offset = ev(1)
+            elif len(args) >= 3:
+                offset, type_name = ev(1), str(ev(2))
+            return memory.read(source, offset, type_name)
+
+        if low == "numput":
+            if len(args) < 3:
+                return 0
+            # NumPut(Type, Value, [Type, Value...], Target [, Offset]).
+            target_index, offset = None, 0
+
+            def is_target(value):
+                if isinstance(value, memory.AhkBuffer):
+                    return True
+                if isinstance(value, int) and memory.resolve(value)[0] is not None:
+                    return True
+                return False
+
+            try:
+                last = ev(len(args) - 1)
+            except Exception:
+                last = None
+            if is_target(last):
+                target_index = len(args) - 1
+            elif len(args) >= 4:
+                try:
+                    prev = ev(len(args) - 2)
+                    if is_target(prev):
+                        target_index = len(args) - 2
+                        offset = ev(len(args) - 1)
+                except Exception:
+                    target_index = None
+            if target_index is None:
+                self._log_once("NumPut: target is not a Buffer/known pointer (logged)")
+                return 0
+            target = ev(target_index)
+            written = 0
+            for k in range(0, target_index - 1, 2):
+                type_name = str(ev(k))
+                value = ev(k + 1)
+                written += memory.write(target, offset + written, type_name, value)
+            return written
+
+        if low == "strget":
+            if not args:
+                return ""
+            source = ev(0)
+            length = ev(1) if len(args) > 1 and str(args[1]).strip() else None
+            encoding = ev(2) if len(args) > 2 else "UTF-16"
+            return memory.read_string(source, length, encoding)
+
+        if low == "strput":
+            if not args:
+                return 0
+            text = ev(0)
+            if len(args) == 1:
+                raw = memory.allocate_string(text)
+                return max(0, raw.size - 2)
+            # StrPut(String, Encoding) -> required byte count.
+            second = str(ev(1))
+            if re.fullmatch(r"(?i)(utf-?8|utf-?16|unicode|cp0|ansi|latin-?1)",
+                            second) and len(args) == 2:
+                raw = memory.allocate_string(text, second)
+                return max(0, raw.size - 2)
+            target = ev(1)
+            length = ev(2) if len(args) > 2 else None
+            encoding = ev(3) if len(args) > 3 else "UTF-16"
+            return memory.write_string(target, text, encoding, length)
+
+        if low == "strptr":
+            text = ev(0) if args else ""
+            return memory.allocate_string(text).ptr
+
+        if low in ("varptr", "objptr"):
+            name = str(args[0]).strip().lstrip("&") if args else ""
+            buf = getattr(self, "_var_buffers", None)
+            if buf is None:
+                self._var_buffers = {}
+                buf = self._var_buffers
+            if name not in buf:
+                buf[name] = memory.AhkBuffer(8, 0)
+            return buf[name].ptr
+
+        return 0
+
+    def _dll_call(self, args: list):
+        """Whitelisted, bounded DllCall.
+
+        The Windows ABI is not reproduced.  Timing, sleep, process identity,
+        system metrics and a few structure writes used by Natro are real
+        Linux equivalents; GDI/COM calls are explicit display-only stubs that
+        log once and return AHK-falsy.
+        """
+        from . import memory
+        if not args:
+            return 0
+        try:
+            full_name = str(self._eval_expr(args[0])).strip()
+        except Exception:
+            full_name = ""
+        name = full_name.split("\\")[-1].lower()
+        if not name:
+            self._log_once("DllCall: empty function name (returns 0)")
+            return 0
+
+        pairs = []
+        index = 1
+        while index + 1 < len(args):
+            try:
+                type_name = str(self._eval_expr(args[index])).strip()
+            except Exception:
+                type_name = ""
+            raw = str(args[index + 1]).strip()
+            target = None
+            m = re.match(r"^&\s*([A-Za-z_]\w*)\s*(?::=\s*(.*))?$",
+                         raw, re.DOTALL)
+            if m:
+                target = m.group(1)
+                if target not in self.vars:
+                    try:
+                        self.vars[target] = self._eval_expr(m.group(2)) if m.group(2) else 0
+                    except Exception:
+                        self.vars[target] = 0
+                value = self.vars.get(target, 0)
+            else:
+                try:
+                    value = self._eval_expr(raw)
+                except Exception:
+                    value = 0
+            pairs.append({"type": type_name, "raw": raw,
+                          "target": target, "value": value})
+            index += 2
+
+        def value_at(i, default=0):
+            return pairs[i]["value"] if i < len(pairs) else default
+
+        def assign(i, value):
+            if i >= len(pairs):
+                return
+            pair = pairs[i]
+            if pair["target"]:
+                self.vars[pair["target"]] = value
+            elif memory.resolve(pair["value"])[0] is not None:
+                memory.write(pair["value"], 0, pair["type"], value)
+
+        if name == "sleep":
+            self.sim.sleep_ms(int(value_at(0, 0) or 0))
+            return 0
+        if name in ("getcurrentprocessid", "getcurrentthreadid"):
+            return os.getpid() if name == "getcurrentprocessid" else 0
+        if name == "getsystemtimeasfiletime":
+            # FILETIME: 100 ns intervals since 1601-01-01.
+            ticks = (time.time_ns() // 100) + 116444736000000000
+            assign(0, ticks)
+            return ticks
+        if name == "queryperformancecounter":
+            ticks = time.monotonic_ns()
+            assign(0, ticks)
+            return ticks
+        if name == "queryperformancefrequency":
+            return 1_000_000_000
+        if name in ("gettickcount", "gettickcount64"):
+            return int(time.monotonic() * 1000)
+        if name == "getcommandline":
+            return " ".join(sys.argv)
+        if name == "getsystemmetrics":
+            metric = int(value_at(0, 0) or 0)
+            if metric == 0:
+                return int(self.vars.get("A_ScreenWidth") or 1920)
+            if metric == 1:
+                return int(self.vars.get("A_ScreenHeight") or 1080)
+            return 0
+        if name == "globalmemorystatusex":
+            try:
+                pages = os.sysconf("SC_PHYS_PAGES")
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                total = int(pages * page_size)
+            except (ValueError, OSError):
+                total = 0
+            buf = value_at(0)
+            memory.write(buf, 0, "UInt", 64)
+            memory.write(buf, 8, "UInt64", total)
+            return 1
+        if name == "getwindowplacement":
+            hwnd = int(value_at(0, 0) or 0)
+            target = self._own_handle(hwnd)
+            rect = self._window_rect(target, client=False) if target else (0, 0, 0, 0)
+            buf = value_at(1)
+            if memory.resolve(buf)[0] is not None:
+                memory.write(buf, 0, "UInt", 44)
+                memory.write(buf, 28, "Int", rect[0])
+                memory.write(buf, 32, "Int", rect[1])
+                memory.write(buf, 36, "Int", rect[0] + rect[2])
+                memory.write(buf, 40, "Int", rect[1] + rect[3])
+                return 1
+            return 0
+        if name == "getlocaleinfoex":
+            buf = value_at(2)
+            text = "M/d/yyyy"
+            memory.write_string(buf, text, "UTF-16")
+            return len(text) + 1
+        if name == "getdateformatex":
+            buf = value_at(4)
+            text = time.strftime("%m/%d/%Y")
+            memory.write_string(buf, text, "UTF-16")
+            return len(text) + 1
+        if name == "getnumberformatex":
+            buf = value_at(5)
+            text = str(value_at(2, ""))
+            memory.write_string(buf, text, "UTF-16")
+            return len(text) + 1
+        if name == "getdurationformatex":
+            buf = value_at(0)
+            memory.write_string(buf, "00:00:00", "UTF-16")
+            return 9
+        if name == "gettextextentpoint32":
+            buf = value_at(3)
+            text = str(value_at(1, ""))
+            memory.write(buf, 0, "Int", max(1, len(text) * 8))
+            memory.write(buf, 4, "Int", 16)
+            return 1
+        # GDI/COM/user32 calls used only by display-only paths.  These are
+        # deliberately no-ops, not fake handles: Natro's vision layer replaces
+        # Gdip image processing, and the overlay windows are not recreated.
+        if name in {
+            "deleteobject", "selectobject", "deletedc", "deleteenhmf",
+            "createcompatibledc", "getdc", "releasedc", "bitblt",
+            "createdibsection", "setcursor", "loadcursor", "copyshortcut",
+            "systemparametersinfo", "virtualprotect", "rtlmovememory",
+            "setlasterror", "getlasterror", "createthread", "closehandle",
+            "localalloc", "globalalloc", "globallock", "globalunlock",
+            "globalfree", "globalsize",
+        }:
+            self._log_once(f"DllCall {full_name}: display-only/no-op on Linux (logged)")
+            return 1 if name not in ("getdc", "createdibsection") else 0
+        self._log_once(
+            f"DllCall {full_name}: Windows ABI not modeled on Linux "
+            "(returns 0; logged)")
+        return 0
 
     def _pure_builtin(self, low: str, args: list):
         """Side-effect-free builtins usable inside expressions. Unknown GUI/OS
