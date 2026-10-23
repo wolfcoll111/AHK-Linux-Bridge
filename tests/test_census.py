@@ -132,3 +132,20 @@ def test_worker_deadline_returns_partial_inventory(tmp_path):
     elapsed = time.monotonic() - started
     assert result["deadline_hit"] is True
     assert elapsed < 2.0
+
+
+def test_dllcall_expression_artifact_is_not_a_windows_gap():
+    kind, name, _ = census.classify_log(
+        "DllCall expression Buffer(0, 0x100000bc): evaluated to a "
+        "non-callable value (returns 0; logged)")
+    assert (kind, name) == (
+        "dllcall-expression", "Buffer(0, 0x100000bc)")
+    assert census.verdict_for(name, kind) == "parser-raw"
+
+
+def test_dllcall_function_pointer_is_a_windows_gap():
+    kind, name, _ = census.classify_log(
+        "DllCall function pointer 0x10000000: Windows ABI not modeled "
+        "on Linux (returns 0; logged)")
+    assert (kind, name) == ("dllcall-fptr", "0x10000000")
+    assert census.verdict_for(name, kind) == "windows-only"

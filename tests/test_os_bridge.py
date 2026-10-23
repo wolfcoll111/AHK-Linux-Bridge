@@ -304,6 +304,20 @@ def test_dllcall_buffer_structure_write():
         _close_guis(rt)
 
 
+def test_dllcall_expression_and_pointer_targets_are_logged():
+    rt = run(
+        'a := DllCall(Buffer(8), "UPtr", 0)\n'
+        'b := DllCall(PixelateBitmap.Ptr)\n'
+        'c := DllCall(StrPtr("x"))\n'
+    )
+    rt.run_auto()
+    assert rt.vars["a"] == rt.vars["b"] == rt.vars["c"] == 0
+    texts = "\n".join(rt.logs)
+    assert "DllCall expression Buffer(8)" in texts
+    assert "DllCall expression PixelateBitmap.Ptr" in texts
+    assert "DllCall function pointer 0x" in texts
+
+
 def test_dllcall_condition_keeps_strptr_argument_raw():
     """A long base64 value must not be re-parsed as a comparison expression."""
     data = "A" * 600 + "=="

@@ -312,6 +312,8 @@ RE_CMD_NOOP = re.compile(r"^(\w+)(?:\s.*?)? \((?:OS/window op|noted), linux no-o
 RE_SETTING = re.compile(r"^setting (\S+) ")
 RE_INCLUDE = re.compile(r"^#Include (.+?) \(not inlined")
 RE_GDIP_ERR = re.compile(r"^(Gdip_\w+) failed")
+RE_DLLCALL_EXPR = re.compile(r"^DllCall expression (.+?): ")
+RE_DLLCALL_FPTR = re.compile(r"^DllCall function pointer (0x[0-9a-f]+): ")
 RE_DLLCALL = re.compile(r"^DllCall ([^:]+): ")
 RE_CENSUS = re.compile(r"^census: ")
 
@@ -353,6 +355,13 @@ def classify_log(line: str):
     m = RE_GDIP_ERR.match(line)
     if m:
         return ("gdip-error", m.group(1), line)
+    m = RE_DLLCALL_EXPR.match(line)
+    if m:
+        # A Buffer/member expression leaked outside its function body.
+        return ("dllcall-expression", m.group(1).strip(), line)
+    m = RE_DLLCALL_FPTR.match(line)
+    if m:
+        return ("dllcall-fptr", m.group(1).strip(), line)
     m = RE_DLLCALL.match(line)
     if m:
         # Whitelisted calls that are real/Linux-equivalent do not log; every
@@ -377,7 +386,10 @@ def verdict_for(name: str, kind: str) -> str:
         return "display-only"
     if low in EXTERNAL:
         return "external-service"
-    if low in WINDOWS_ONLY or kind in ("gdip", "gdip-error", "dllcall"):
+    if kind == "dllcall-expression":
+        return "parser-raw"
+    if low in WINDOWS_ONLY or kind in (
+            "gdip", "gdip-error", "dllcall", "dllcall-fptr"):
         return "windows-only"
     return "unknown"
 

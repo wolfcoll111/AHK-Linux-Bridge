@@ -2389,10 +2389,37 @@ class Runtime:
         from . import memory
         if not args:
             return 0
+        first_raw = str(args[0]).strip()
         try:
-            full_name = str(self._eval_expr(args[0])).strip()
+            first = self._eval_expr(args[0])
         except Exception:
-            full_name = ""
+            first = ""
+        # A valid DllCall target is a library/function name string or a
+        # numeric function address.  A Buffer/object here is a source
+        # expression leaked outside its function body (or a genuine
+        # function-pointer call, which this ABI does not model).
+        if isinstance(first, memory.AhkBuffer) or not isinstance(
+                first, (str, int, float)):
+            source = first_raw.replace("\n", " ")[:96]
+            self._log_once(
+                f"DllCall expression {source}: evaluated to a non-callable "
+                "value (returns 0; logged)")
+            return 0
+        if isinstance(first, (int, float)) and int(first) != 0:
+            self._log_once(
+                f"DllCall function pointer 0x{int(first):x}: Windows ABI "
+                "not modeled on Linux (returns 0; logged)")
+            return 0
+        full_name = str(first).strip()
+        if not (first_raw[:1] in ('"', "'")):
+            # Undefined member access remains a literal string such as
+            # `PixelateBitmap.Ptr`; that is not a DLL export name.
+            if any(ch in full_name for ch in "().") and first_raw not in self.vars:
+                source = first_raw.replace("\n", " ")[:96]
+                self._log_once(
+                    f"DllCall expression {source}: unresolved source "
+                    "expression (returns 0; logged)")
+                return 0
         name = full_name.split("\\")[-1].lower()
         if not name:
             self._log_once("DllCall: empty function name (returns 0)")
