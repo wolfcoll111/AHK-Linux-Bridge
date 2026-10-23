@@ -4559,9 +4559,13 @@ class Runtime:
                 break
             name, argstr, start, end = call
             raw = [p.strip() for p in _ss(argstr)] if argstr.strip() else []
-            args = [self._eval_expr(p) for p in raw if p != ""]
+            raw = [p for p in raw if p != ""]
             try:
-                value = self._call_value(P.FuncCall(name, args))
+                # Keep source expressions raw: _call_value evaluates user
+                # function args and builtins such as StrPtr/NumGet need the
+                # original `&out`/quoted-string position.  Evaluating here
+                # turns a base64 variable into a self-referential expression.
+                value = self._call_value(P.FuncCall(name, raw))
             except Exception:
                 return None
             literal = self._num_literal(value)

@@ -304,6 +304,21 @@ def test_dllcall_buffer_structure_write():
         _close_guis(rt)
 
 
+def test_dllcall_condition_keeps_strptr_argument_raw():
+    """A long base64 value must not be re-parsed as a comparison expression."""
+    data = "A" * 600 + "=="
+    rt = run(
+        f'data := "{data}"\n'
+        'hits := 0\n'
+        'if !DllCall("crypt32\\\\CryptStringToBinary", "UPtr", '
+        'StrPtr(data), "UInt", 0, "UInt", 0x01, "UPtr", 0, '
+        '"UInt*", &n := 0, "UPtr", 0, "UPtr", 0)\n'
+        '    hits := 1\n'
+    )
+    rt.run_auto()
+    assert rt.vars["hits"] == 1
+
+
 def test_missing_external_window_is_logged_and_falsy(monkeypatch):
     import ahk_bridge.window_ops as wo
 
