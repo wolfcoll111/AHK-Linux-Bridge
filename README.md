@@ -2,9 +2,10 @@
 
 Run Windows-style AHK v2 farming/productivity macros on Linux with one
 input API that routes to **uinput** (universal) or **XTest** (X11
-fallback). The current milestone is **v0.7**: the Linux OS bridge for
-windows, controls, clipboard and bounded memory/DllCall, on top of the
-v0.6 PySide6 GUI layer.
+fallback). **v0.8** starts the real Natro macro end-to-end on a
+disposable copy: config, includes, GUI, timers and steady-state loop.
+The **v1.0 capability matrix** records the remaining Linux boundaries
+explicitly.
 
 ## Status
 
@@ -15,15 +16,20 @@ v0.6 PySide6 GUI layer.
   clipboard, bounded buffers and a whitelisted `DllCall` surface.
   Missing targets raise AHK-style `TargetError`; unsupported Windows ABI,
   COM and function-pointer calls are logged explicitly and return falsy.
-- **Next (v0.8):** full live Natro startup with its config/timers/
-  submacros/main loop, followed by a measured soak. The GUI alone is
-  proven; live startup is not claimed yet.
+- **v0.8:** full cold startup of the real Natro main script with
+  **0 startup errors**: 33 files / 1,489 auto statements / 620
+  functions, 813 controls, 9 tabs, `StartButton` enabled. A 600 s
+  offscreen steady-state soak measured CPU, RSS, timer fires and timer
+  drift (see `HANDOFF-v08-startup.md`). No live desktop, game or real
+  Natro tree was touched.
 - Native Wayland surfaces have no foreign HWND. Target XWayland windows or
   use compositor/portal data; the bridge reports the limitation instead of
   inventing a handle.
 
-`docs/CAPABILITY-MATRIX.md` (v1.0) is still to come. Current evidence is
-in `HANDOFF-v07-os.md`, `docs/CENSUS-v0.7.md` and the test suite.
+The v1.0 matrix is published at `docs/CAPABILITY-MATRIX.md`; every row is
+**Implemented**, **Implemented with limitation**, or **Blocked/external**.
+Evidence lives in `HANDOFF-v08-startup.md`, `docs/CENSUS-v0.8.md` and the
+266-test suite.
 
 ## Quickstart
 
@@ -57,17 +63,18 @@ ahk-bridge windows "ahk_exe RobloxPlayerBeta.exe"
 ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
 ```
 
-## AHK v2 surface (v0.7)
+## AHK v2 surface (v0.8)
 
 - Hotkeys (`F1::` block + single-line), hotstrings, dynamic hotkeys and
   timers (positive recurring, negative one-shot, `0` off).
 - `Send` family + `{Enter}{F1}{Space}{a down}` sequences, `Click`/
   `MouseClick`, `MouseMove`, `Sleep`.
 - `Loop N-or-var {}` / `Loop {}`, `While`, `If`/`Else If`/`Else`, `For`,
-  `Switch`, `Try`/`Catch`/`Finally`, `Break`/`Continue`, functions,
-  classes and includes.
-- `x := expr` (arithmetic, `Random(a,b)`, strings, vars), objects,
-  arrays, maps.
+  `Switch` (including inline `Case 1: stmt`), `Try`/`Catch`/`Finally`,
+  `Break`/`Continue`, functions, classes and includes.
+- `x := expr`, arrow functions returning object literals, objects,
+  arrays, maps, case-insensitive variables and `StrSplit` by delimiter or
+  character index.
 - `MsgBox`, live `PixelSearch` (mss, `FoundX`/`FoundY`), image search,
   screen capture and `WinActivate` (Hyprland match, else logged).
 - GUI: `Gui`, controls, tabs, `Show`/`Submit`, events, absolute and
@@ -77,8 +84,11 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `ControlGet*`, PIDs/process names, `TargetError` on missing targets.
 - Memory/DllCall: bounded `Buffer`, `NumGet`/`NumPut`, string helpers,
   and a documented whitelist for timing, process identity, system
-  metrics, locale/date/text and selected structure writes. GDI+/COM are
-  explicit display-only/no-op gaps.
+  metrics, locale/date/text and selected structure writes. `HashFile`
+  uses real MD5/SHA hashing; GDI+/COM are explicit display-only/no-op
+  gaps.
+- Files: real `FileOpen` File objects (`Read`/`Write`/`RawRead`/`Seek`/
+  `Pos`), `FileRead`/`FileAppend`, INI read/write/delete.
 
 ## Hyprland integration
 
@@ -113,9 +123,11 @@ never touches the real Natro tree or live desktop.
 
 ## Docs
 
-- `HANDOFF-v07-os.md` — current verified state, limitations, v0.8 plan
-- `docs/CENSUS-v0.7.md` — Natro census and known-gap taxonomy
-- `docs/CENSUS-v0.6.md` — previous baseline
+- `HANDOFF-v08-startup.md` — current verified startup/soak state and limitations
+- `docs/CAPABILITY-MATRIX.md` — v1.0 status for every load-bearing surface
+- `docs/CENSUS-v0.8.md` — current Natro census and known-gap taxonomy
+- `HANDOFF-v07-os.md` — previous OS-bridge handoff
+- `docs/CENSUS-v0.7.md` — previous census baseline
 - `docs/GUI-DECISION.md` — PySide6 measurement and decision
 - `docs/INSTALL.md` — udev/portal setup + troubleshooting
 - `ARCHITECTURE.md` — diagram, stack choices, layout
@@ -124,7 +136,8 @@ never touches the real Natro tree or live desktop.
 ## Roadmap
 
 - **v0.8:** real Natro startup with config/GUI/timers/submacros/main loop,
-  then a measured latency/CPU/RSS soak.
-- **v1.0:** capability matrix with no `unknown` rows, covering windows,
+  plus a measured latency/CPU/RSS soak. **Complete.**
+- **v1.0:** capability matrix with no `unknown` rows covering windows,
   clipboard, memory/DllCall, COM/WinHttp, GDI+/vision, timers, IPC and
-  input. Documented blockers stay visible.
+  input. **Published** in `docs/CAPABILITY-MATRIX.md`; documented blockers
+  stay visible rather than being stubbed into false success.
