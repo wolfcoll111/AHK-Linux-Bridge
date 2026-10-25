@@ -467,7 +467,7 @@ class Runtime:
         try:
             from . import __version__ as _version
         except Exception:  # pragma: no cover - version import is optional
-            _version = "0.1.0"
+            _version = "0.8.0"
         self.vars.update({
             "A_ScriptDir": script_dir,
             "A_ScriptName": script_name,

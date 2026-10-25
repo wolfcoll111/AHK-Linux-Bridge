@@ -1,6 +1,6 @@
 [project]
 name = "ahk-linux-bridge"
-version = "0.7.0"
+version = "0.8.0"
 description = "Cross-platform AHK v2 macro engine for Linux (X11 + Wayland via uinput)"
 readme = "README.md"
 requires-python = ">=3.10"
