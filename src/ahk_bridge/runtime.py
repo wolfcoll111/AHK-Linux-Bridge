@@ -1816,6 +1816,8 @@ class Runtime:
             return self._win_exist(c.args)
         if low == "wingetcount":
             return self._win_get_count(c.args)
+        if low == "wingetlist":
+            return self._win_get_list(c.args)
         if low in ("winclose", "winkill"):
             return self._win_close(c.args, kill=(low == "winkill"))
         if low == "winmove":
@@ -2355,14 +2357,76 @@ class Runtime:
         return int(target.get("hwnd", 0)) if target else 0
 
     def _win_get_count(self, args):
-        raw = self._window_arg(args[0], "") if args else ""
-        if not str(raw or "").strip():
-            return 1 if self._resolve_window("A") else 0
-        target = self._resolve_window(raw)
-        if target is not None and target.get("gui") is not None:
-            return 1
+        return len(self._win_get_list(args))
+
+    def _win_get_list(self, args):
+        """AHK WinGetList: visible own Guis plus X11/XWayland windows.
+
+        ``WinText``/``ExcludeText`` filter on control text, which the X11
+        bridge cannot read for a foreign window; refusing them is logged
+        instead of returning windows that do not satisfy the filter.
+        """
+        title_raw = self._window_arg(args[0], "") if len(args) > 0 else ""
+        win_text = self._window_arg(args[1], "") if len(args) > 1 else ""
+        excl_title = self._window_arg(args[2], "") if len(args) > 2 else ""
+        excl_text = self._window_arg(args[3], "") if len(args) > 3 else ""
+        if str(win_text or "").strip() or str(excl_text or "").strip():
+            self._log_once(
+                "WinGetList: WinText/ExcludeText need foreign control text; "
+                "not available on Linux (returns no windows)")
+            return []
         from . import window_ops
-        return len(window_ops.find_all(str(raw)))
+        spec = window_ops.parse_spec(str(title_raw or ""))
+        if spec["group"]:
+            self._log_once(
+                "WinGetList: ahk_group needs a GroupAdd registry (not "
+                "available on Linux; returns no windows)")
+            return []
+        found = []
+        for gui in self._guis:
+            if gui.destroyed or not gui.visible:
+                continue
+            if self._own_gui_matches(gui, spec) and int(gui.hwnd) not in found:
+                found.append(int(gui.hwnd))
+        if spec["id"]:
+            external = [spec["id"]] if window_ops.geometry(spec["id"]) else []
+        elif any(spec[key] for key in ("title", "exe", "class", "pid")):
+            external = window_ops.find_all(str(title_raw))
+        else:
+            external = window_ops.list_windows()
+        for hwnd in external:
+            if int(hwnd) not in found:
+                found.append(int(hwnd))
+        exclude = str(excl_title or "").strip().strip('"')
+        if exclude:
+            found = [hwnd for hwnd in found
+                     if exclude.lower() not in self._window_title(hwnd).lower()]
+        return found
+
+    def _own_gui_matches(self, gui, spec) -> bool:
+        """Apply WinTitle criteria to an own Gui window."""
+        from . import window_ops
+        if spec["group"]:
+            return False
+        if spec["id"] and int(gui.hwnd) != int(spec["id"]):
+            return False
+        if spec["pid"] and int(spec["pid"]) != os.getpid():
+            return False
+        if spec["exe"] and not window_ops._exe_matches(
+                spec["exe"], window_ops._process_identity(os.getpid())):
+            return False
+        if spec["class"] and spec["class"] != "AutoHotkeyGUI":
+            return False
+        if spec["title"] and spec["title"].lower() not in gui.title.lower():
+            return False
+        return True
+
+    def _window_title(self, hwnd) -> str:
+        own = self._own_handle(int(hwnd))
+        if own is not None:
+            return str(own.get("title", ""))
+        from . import window_ops
+        return window_ops.title(int(hwnd))
 
     def _win_close(self, args, kill=False):
         raw = args[0] if args else ""

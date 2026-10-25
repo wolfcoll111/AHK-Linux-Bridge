@@ -19,6 +19,7 @@ WINDOWS = {
     100: {"title": "Roblox", "class": "roblox", "pid": 4242},
     200: {"title": "Roblox Studio", "class": "roblox", "pid": 999},
     300: {"title": "Terminal", "class": "kitty", "pid": 5151},
+    400: {"title": "Roblox Helper", "class": "robloxhelper", "pid": 999},
 }
 
 IDENTITIES = {
@@ -142,6 +143,12 @@ def test_find_class_and_title_are_anded(fake_x11, fake_proc):
     assert wo.find("Missing ahk_class roblox") == 0
 
 
+def test_ahk_class_is_exact_not_a_substring(fake_x11, fake_proc):
+    # `ahk_class AutoHotkey` must not match `AutoHotkeyGUI` (AHK semantics).
+    assert wo.find_all("ahk_class roblox") == [100, 200]
+    assert wo.find("ahk_class robloxhelper") == 400
+
+
 def test_find_pid_searches_by_pid(fake_x11, fake_proc):
     assert wo.find("ahk_pid 4242") == 100
     assert wo.find("ahk_pid 31337") == 0
@@ -223,3 +230,66 @@ def test_winactivate_statement_evaluates_concatenated_ahk_id(monkeypatch):
     rt = _run('hwnd := 12345\nWinActivate "ahk_id " hwnd\n')
     assert activated == [12345], rt.logs
     assert any("X window 12345" in line for line in rt.logs)
+
+
+def test_wingetlist_includes_external_matches(monkeypatch):
+    import ahk_bridge.window_ops as ops
+    monkeypatch.setattr(ops, "find_all", lambda text: [100, 200])
+    monkeypatch.setattr(ops, "title",
+                        lambda wid: {100: "Roblox", 200: "Studio"}[wid])
+    rt = _run('list := WinGetList("ahk_class roblox")\n')
+    assert rt.vars["list"] == [100, 200]
+
+
+def test_wingetlist_enumerates_own_guis_and_excludes_title(monkeypatch):
+    pytest.importorskip("PySide6")
+    import ahk_bridge.window_ops as ops
+    monkeypatch.setattr(ops, "find_all", lambda text: [])
+    monkeypatch.setattr(ops, "list_windows", lambda: [])
+    rt = _run(
+        'g1 := Gui("", "Alpha")\n'
+        'g2 := Gui("", "Beta")\n'
+        'g1.Show()\n'
+        'g2.Show()\n'
+        'all := WinGetList("ahk_class AutoHotkeyGUI")\n'
+        'filtered := WinGetList("", "", "Beta")\n'
+        'count := WinGetCount("ahk_class AutoHotkeyGUI")\n'
+    )
+    try:
+        g1, g2 = rt.vars["g1"], rt.vars["g2"]
+        assert g1.hwnd in rt.vars["all"]
+        assert g2.hwnd in rt.vars["all"]
+        assert g1.hwnd in rt.vars["filtered"]
+        assert g2.hwnd not in rt.vars["filtered"]
+        assert rt.vars["count"] == 2
+    finally:
+        for gui in list(rt._guis):
+            gui._destroy()
+
+
+def test_wingetlist_refuses_wintext_instead_of_ignoring_it(monkeypatch):
+    rt = _run('list := WinGetList("ahk_class roblox", "Some control text")\n')
+    assert rt.vars["list"] == []
+    assert any("WinText" in line for line in rt.logs)
+
+
+def test_wingetlist_refuses_ahk_group(monkeypatch):
+    rt = _run('list := WinGetList("ahk_group GameWindows")\n')
+    assert rt.vars["list"] == []
+    assert any("ahk_group" in line for line in rt.logs)
+
+
+def test_wingetcount_without_title_lists_own_and_external(monkeypatch):
+    pytest.importorskip("PySide6")
+    import ahk_bridge.window_ops as ops
+    monkeypatch.setattr(ops, "list_windows", lambda: [700])
+    rt = _run(
+        'MainGui := Gui("", "Counted")\n'
+        'MainGui.Show()\n'
+        'count := WinGetCount()\n'
+    )
+    try:
+        assert rt.vars["count"] == 2
+    finally:
+        for gui in list(rt._guis):
+            gui._destroy()

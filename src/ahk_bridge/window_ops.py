@@ -161,6 +161,11 @@ def _search_ids(flag: str, value: str) -> list[int]:
             if token.isdigit()]
 
 
+def list_windows() -> list[int]:
+    """All visible X11/XWayland windows (AHK's empty-WinTitle list)."""
+    return _search_ids("--name", "")
+
+
 def _candidate_ids(spec: dict) -> list[int]:
     """Narrow the X11 window list with the cheapest available criterion."""
     if spec["pid"]:
@@ -187,7 +192,8 @@ def _window_matches(wid: int, spec: dict) -> bool:
         return False
     if spec["title"] and spec["title"].lower() not in title(wid).lower():
         return False
-    if spec["class"] and spec["class"].lower() not in class_name(wid).lower():
+    if spec["class"] and spec["class"] != class_name(wid):
+        # AHK's ahk_class is exact and case-sensitive outside RegEx mode.
         return False
     window_pid = pid(wid) if (spec["pid"] or spec["exe"]) else 0
     if spec["pid"] and window_pid != int(spec["pid"]):
