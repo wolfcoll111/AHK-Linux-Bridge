@@ -4252,9 +4252,23 @@ class Runtime:
             else:
                 self.vars["A_LoopField"] = saved_field
 
+    @staticmethod
+    def _file_stamp(timestamp) -> str:
+        """AHK file-loop time format: YYYYMMDDHH24MISS."""
+        try:
+            return time.strftime("%Y%m%d%H%M%S",
+                                 time.localtime(float(timestamp)))
+        except (TypeError, ValueError, OSError):
+            return ""
+
     def _loop_files(self, st: P.LoopFiles):
-        """Iterate files matching a glob (AHK `Loop Files`). Sets
-        A_LoopFileName/FullPath/Dir/Ext/NameNoExt + A_Index."""
+        """Iterate files matching a glob (AHK `Loop Files`).
+
+        Populates the v2 file-loop specials.  Linux has no 8.3 short names
+        and no portable file-creation timestamp, so those stay blank
+        instead of being fabricated; size and access/modify times are real
+        ``stat`` values.
+        """
         import glob as _glob
         import os as _os
         pat = str(self._eval_expr(st.pattern)).replace("\\", _os.sep)
@@ -4266,18 +4280,50 @@ class Runtime:
         except Exception as e:
             self.logs.append(f"Loop Files error: {e}")
             return
-        saved = {k: self.vars.get(k) for k in
-                 ("A_Index", "A_LoopFileName", "A_LoopFileFullPath",
-                  "A_LoopFileDir", "A_LoopFileExt", "A_LoopFileNameNoExt")}
+        loop_keys = (
+            "A_Index", "A_LoopFileName", "A_LoopFilePath",
+            "A_LoopFileFullPath", "A_LoopFileDir", "A_LoopFileExt",
+            "A_LoopFileNameNoExt", "A_LoopFileShortPath",
+            "A_LoopFileShortName", "A_LoopFileAttrib",
+            "A_LoopFileTimeModified", "A_LoopFileTimeCreated",
+            "A_LoopFileTimeAccessed", "A_LoopFileSize",
+            "A_LoopFileSizeKB", "A_LoopFileSizeMB")
+        saved = {k: self.vars.get(k) for k in loop_keys}
         try:
             for ai, fp in enumerate(files, 1):
                 base = _os.path.basename(fp)
                 name, ext = _os.path.splitext(base)
+                try:
+                    info = _os.stat(fp)
+                except OSError:
+                    info = None
+                size = info.st_size if info is not None else 0
+                created = getattr(info, "st_birthtime", None) \
+                    if info is not None else None
                 self.vars.update({
                     "A_Index": ai, "A_LoopFileName": base,
-                    "A_LoopFileFullPath": fp, "A_LoopFileDir": _os.path.dirname(fp),
+                    # v2 renamed v1's A_LoopFileFullPath to A_LoopFilePath;
+                    # keep both because the corpus uses each spelling.
+                    "A_LoopFilePath": fp,
+                    "A_LoopFileFullPath": fp,
+                    "A_LoopFileDir": _os.path.dirname(fp),
                     "A_LoopFileExt": ext.lstrip("."),
-                    "A_LoopFileNameNoExt": name})
+                    "A_LoopFileNameNoExt": name,
+                    # No 8.3 short names on Linux; AHK also leaves these
+                    # blank when the file has none.
+                    "A_LoopFileShortPath": "",
+                    "A_LoopFileShortName": "",
+                    # Windows attribute letters have no Linux equivalent.
+                    "A_LoopFileAttrib": "",
+                    "A_LoopFileTimeModified":
+                        self._file_stamp(info.st_mtime) if info else "",
+                    "A_LoopFileTimeCreated":
+                        self._file_stamp(created) if created else "",
+                    "A_LoopFileTimeAccessed":
+                        self._file_stamp(info.st_atime) if info else "",
+                    "A_LoopFileSize": size,
+                    "A_LoopFileSizeKB": size // 1024,
+                    "A_LoopFileSizeMB": size // (1024 * 1024)})
                 self._check()
                 try:
                     self._exec_block(st.body)

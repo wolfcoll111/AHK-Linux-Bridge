@@ -1,6 +1,7 @@
 """v0.3 Natro-driven constructs: switch, for, try, Loop Parse/Files, Map,
 subscripts, ternary, compound-assign, Seq, fat-arrow, KeyWait, Ini, Throw."""
 import os
+import time
 
 import pytest
 
@@ -456,6 +457,42 @@ def test_loop_files(tmp_path, monkeypatch):
     sc, rt, sim = run('Loop Files "*.ahk" {\nSend "{A_LoopFileName}"\n}\n')
     rt.run_auto()
     assert sorted(types(sim)) == ["a.ahk", "b.ahk"]
+
+
+def test_loop_files_v2_specials_and_fileopen_by_path(tmp_path, monkeypatch):
+    """Natro's pattern importer opens A_LoopFilePath, not the v1 name."""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "sample.ahk"
+    target.write_text("hello")
+    info = target.stat()
+    sc, rt, sim = run(
+        'Loop Files "*.ahk" {\n'
+        '    path := A_LoopFilePath\n'
+        '    full := A_LoopFileFullPath\n'
+        '    size := A_LoopFileSize\n'
+        '    kb := A_LoopFileSizeKB\n'
+        '    modified := A_LoopFileTimeModified\n'
+        '    created := A_LoopFileTimeCreated\n'
+        '    short := A_LoopFileShortName\n'
+        '    attrib := A_LoopFileAttrib\n'
+        '    f := FileOpen(A_LoopFilePath, "r")\n'
+        '    content := f.Read()\n'
+        '    f.Close()\n'
+        '}\n')
+    rt.run_auto()
+    assert rt.vars["path"] == str(target)
+    assert rt.vars["full"] == str(target)
+    assert rt.vars["size"] == 5
+    assert rt.vars["kb"] == 0
+    assert rt.vars["modified"] == time.strftime(
+        "%Y%m%d%H%M%S", time.localtime(info.st_mtime))
+    birth = getattr(info, "st_birthtime", None)
+    assert rt.vars["created"] == (
+        time.strftime("%Y%m%d%H%M%S", time.localtime(birth)) if birth else "")
+    assert rt.vars["short"] == ""
+    assert rt.vars["attrib"] == ""
+    assert rt.vars["content"] == "hello"
+    assert not any("FileOpen failed" in line for line in rt.logs), rt.logs
 
 
 def test_deref_and_a_index():
