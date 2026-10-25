@@ -1546,7 +1546,9 @@ class Runtime:
         elif isinstance(st, P.MsgBox):
             self.logs.append("MsgBox: " + self._interp(st.text))
         elif isinstance(st, P.WinActivate):
-            self._win_activate(st.title)
+            # Evaluate expression WinTitles such as `"ahk_id " hwnd`; fall
+            # back to the literal text for titles that are not expressions.
+            self._win_activate_value(self._window_arg(st.title, st.title))
         elif isinstance(st, P.PixelSearch):
             self._pixel_search(st)
         else:
@@ -2214,11 +2216,10 @@ class Runtime:
                         "hwnd": gui.hwnd, "title": gui.title}
 
         from . import window_ops
-        if phrase:
-            hwnd = window_ops.find(text)
-            if hwnd:
-                return {"kind": "external", "gui": None, "control": None,
-                        "hwnd": hwnd, "title": window_ops.title(hwnd)}
+        hwnd = window_ops.find(text)
+        if hwnd:
+            return {"kind": "external", "gui": None, "control": None,
+                    "hwnd": hwnd, "title": window_ops.title(hwnd)}
         self._log_once(
             f"window {text!r} not found (X11/XWayland helper or native "
             "Wayland surface; no HWND)")
@@ -2489,6 +2490,13 @@ class Runtime:
                 widget.activateWindow()
             self._active_gui = gui
             return 1
+        if target is not None:
+            from . import window_ops
+            hwnd = int(target.get("hwnd", 0))
+            if window_ops.activate(hwnd):
+                self.logs.append(
+                    f"WinActivate {str(value)!r} -> X window {hwnd}")
+                return 1
         self._win_activate(str(value or ""))
         return 1
 

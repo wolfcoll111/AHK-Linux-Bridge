@@ -16,6 +16,13 @@ import subprocess
 
 _TIMEOUT = 2.0
 
+# Criteria recognised in an AHK v2 WinTitle.  Criteria follow the title
+# phrase, separated by one space/tab; a criterion value may be quoted when
+# it contains spaces (for example a Windows executable under Wine).
+_SPEC_RE = re.compile(
+    r'(?i)(?:^|\s)ahk_(id|pid|exe|class|group)\s+("(?:[^"]*)"|[^\s"]+)'
+)
+
 
 def _run(argv, timeout=_TIMEOUT, text=True):
     try:
@@ -31,55 +38,190 @@ def _xdotool() -> str | None:
     return shutil.which("xdotool")
 
 
-def _window_title_query(text: str) -> str:
-    """Extract the title portion from an AHK WinTitle expression."""
-    # `Roblox ahk_exe RobloxPlayerBeta.exe` -> `Roblox`.
-    phrase = re.split(r"\s+ahk_(?:exe|class|pid|group)\b", text,
-                      flags=re.IGNORECASE)[0].strip()
-    return phrase.strip().strip('"')
+def _as_int(value: str) -> int:
+    for base in (0, 10):
+        try:
+            return int(str(value).strip(), base)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def parse_spec(text: str) -> dict:
+    """Split a WinTitle into its title phrase and ``ahk_`` criteria.
+
+    The title is everything before the first criterion.  Values are kept
+    verbatim apart from one layer of surrounding quotes.  ``ahk_group`` is
+    returned as a non-empty string even though this module has no
+    ``GroupAdd`` registry: callers must refuse that match rather than
+    silently dropping the group and returning an unrelated window.
+    """
+    text = str(text or "").strip()
+    spec = {"title": "", "id": 0, "pid": 0, "exe": "", "class": "",
+            "group": ""}
+    first = None
+    for match in _SPEC_RE.finditer(text):
+        if first is None:
+            first = match.start()
+        key = match.group(1).lower()
+        value = match.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if key in ("id", "pid"):
+            spec[key] = _as_int(value)
+        else:
+            spec[key] = value
+    if first is None:
+        spec["title"] = text.strip().strip('"').strip()
+    else:
+        spec["title"] = text[:first].strip().strip('"').strip()
+    return spec
+
+
+def _iter_pids() -> list[int]:
+    try:
+        return [int(pid) for pid in os.listdir("/proc") if pid.isdigit()]
+    except OSError:
+        return []
+
+
+def _process_identity(pid: int) -> dict:
+    """Collect the names and paths belonging to ``/proc/<pid>``.
+
+    Native processes expose the executable through ``/proc/pid/exe``.
+    Wine's ``comm`` is truncated to 15 characters and its ``exe`` link is
+    the Wine loader, so the Windows executable is read from the command
+    line as well.  A vanished process simply contributes no names.
+    """
+    names: list[str] = []
+    paths: list[str] = []
+    try:
+        with open(f"/proc/{int(pid)}/comm", encoding="utf-8",
+                  errors="replace") as handle:
+            comm = handle.read().strip()
+        if comm:
+            names.append(comm)
+    except OSError:
+        pass
+    try:
+        exe = os.readlink(f"/proc/{int(pid)}/exe")
+        if exe:
+            paths.append(exe)
+            names.append(os.path.basename(exe))
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as handle:
+            tokens = handle.read().split(b"\0")
+    except OSError:
+        tokens = []
+    for token in tokens:
+        if not token:
+            continue
+        text = token.decode("utf-8", "replace")
+        # Wine passes C:\Games\RobloxPlayerBeta.exe as an argument, so split
+        # on both separators before taking the basename.
+        names.append(re.split(r"[\\/]", text)[-1])
+        paths.append(text)
+    return {"names": [name for name in names if name],
+            "paths": [path for path in paths if path]}
+
+
+def _exe_matches(want: str, identity: dict) -> bool:
+    """Case-insensitive AHK ahk_exe match: file name or full path.
+
+    AHK matches the process name (e.g. ``notepad.exe``) or an exact path,
+    never an arbitrary substring.  A path containing a separator is
+    compared as a whole; a bare name is compared with each candidate
+    basename so a truncated Wine ``comm`` does not hide the real exe.
+    """
+    wanted = str(want or "").strip().lower().replace("\\", "/")
+    if not wanted:
+        return False
+    if "/" in wanted:
+        return any(str(path).lower().replace("\\", "/") == wanted
+                   for path in identity.get("paths", ()))
+    return any(str(name).lower() == wanted
+               for name in identity.get("names", ()))
+
+
+def _pids_for_exe(want: str) -> list[int]:
+    return [pid for pid in _iter_pids()
+            if _exe_matches(want, _process_identity(pid))]
+
+
+def _search_ids(flag: str, value: str) -> list[int]:
+    tool = _xdotool()
+    if not tool:
+        return []
+    proc = _run([tool, "search", "--onlyvisible", flag, value])
+    if proc is None or proc.returncode != 0:
+        return []
+    return [int(token) for token in (proc.stdout or "").split()
+            if token.isdigit()]
+
+
+def _candidate_ids(spec: dict) -> list[int]:
+    """Narrow the X11 window list with the cheapest available criterion."""
+    if spec["pid"]:
+        return _search_ids("--pid", str(spec["pid"]))
+    if spec["class"]:
+        return _search_ids("--class", re.escape(spec["class"]))
+    if spec["exe"]:
+        found: list[int] = []
+        for pid in _pids_for_exe(spec["exe"]):
+            for wid in _search_ids("--pid", str(pid)):
+                if wid not in found:
+                    found.append(wid)
+        return found
+    if spec["title"]:
+        return _search_ids("--name", re.escape(spec["title"]))
+    return []
+
+
+def _window_matches(wid: int, spec: dict) -> bool:
+    if spec["group"]:
+        # No GroupAdd registry on Linux yet; refusing is truthful.
+        return False
+    if spec["id"] and int(wid) != int(spec["id"]):
+        return False
+    if spec["title"] and spec["title"].lower() not in title(wid).lower():
+        return False
+    if spec["class"] and spec["class"].lower() not in class_name(wid).lower():
+        return False
+    window_pid = pid(wid) if (spec["pid"] or spec["exe"]) else 0
+    if spec["pid"] and window_pid != int(spec["pid"]):
+        return False
+    if spec["exe"] and not _exe_matches(spec["exe"],
+                                        _process_identity(window_pid)):
+        return False
+    return True
 
 
 def find(text: str) -> int:
-    """Find an X11/XWayland window.  Returns a window id or 0."""
-    text = str(text or "").strip()
-    tool = _xdotool()
-    if not tool:
+    """Find an X11/XWayland window.  Returns a window id or 0.
+
+    The title phrase and every supplied ``ahk_`` criterion must match; an
+    unsupported or unsatisfied criterion returns 0 instead of an
+    arbitrary window.
+    """
+    spec = parse_spec(text)
+    if spec["group"]:
         return 0
-    m = re.match(r"(?i)^ahk_id\s+(\d+)$", text)
-    if m:
-        wid = int(m.group(1))
-        if get_geometry(wid):
-            return wid
-        return 0
-    title = _window_title_query(text)
-    if not title:
-        # An `ahk_exe`-only spec needs process enumeration, which is not
-        # equivalent to matching every visible X window.  Refuse rather than
-        # returning an arbitrary window.
-        return 0
-    argv = [tool, "search", "--onlyvisible", "--name", re.escape(title)]
-    proc = _run(argv)
-    if proc is None or proc.returncode != 0:
-        return 0
-    for token in (proc.stdout or "").split():
-        if token.isdigit():
-            return int(token)
+    candidates = [spec["id"]] if spec["id"] else _candidate_ids(spec)
+    for wid in candidates:
+        if wid and _window_matches(wid, spec) and geometry(wid):
+            return int(wid)
     return 0
 
 
 def find_all(text: str) -> list[int]:
-    text = str(text or "").strip()
-    tool = _xdotool()
-    if not tool:
+    spec = parse_spec(text)
+    if spec["group"]:
         return []
-    title = _window_title_query(text)
-    if not title:
-        return []
-    argv = [tool, "search", "--onlyvisible", "--name", re.escape(title)]
-    proc = _run(argv)
-    if proc is None or proc.returncode != 0:
-        return []
-    return [int(t) for t in (proc.stdout or "").split() if t.isdigit()]
+    candidates = [spec["id"]] if spec["id"] else _candidate_ids(spec)
+    return [int(wid) for wid in candidates
+            if wid and _window_matches(wid, spec) and geometry(wid)]
 
 
 def geometry(wid: int, client: bool = False):
@@ -134,6 +276,14 @@ def title(wid: int) -> str:
     return (proc.stdout or "").strip() if proc is not None and proc.returncode == 0 else ""
 
 
+def class_name(wid: int) -> str:
+    tool = _xdotool()
+    if not tool or not wid:
+        return ""
+    proc = _run([tool, "getwindowclassname", str(int(wid))])
+    return (proc.stdout or "").strip() if proc is not None and proc.returncode == 0 else ""
+
+
 def pid(wid: int) -> int:
     tool = _xdotool()
     if not tool or not wid:
@@ -146,14 +296,22 @@ def pid(wid: int) -> int:
 
 
 def process_name(wid: int) -> str:
-    win_pid = pid(wid)
-    if not win_pid:
+    """Best available executable name for the window's process.
+
+    Prefer the full name from the command line (Wine reports the Windows
+    exe there), then ``/proc/pid/exe``, then ``comm``.  Never invents a
+    name when the process no longer exists.
+    """
+    window_pid = pid(wid)
+    if not window_pid:
         return ""
-    try:
-        with open(f"/proc/{win_pid}/comm", encoding="utf-8") as fh:
-            return fh.read().strip()
-    except OSError:
-        return ""
+    identity = _process_identity(window_pid)
+    for name in identity["names"]:
+        if name.lower().endswith(".exe"):
+            return name
+    if identity["names"]:
+        return identity["names"][0]
+    return ""
 
 
 def active() -> int:
@@ -165,6 +323,14 @@ def active() -> int:
         return int((proc.stdout or "").strip()) if proc is not None and proc.returncode == 0 else 0
     except ValueError:
         return 0
+
+
+def activate(wid: int) -> bool:
+    tool = _xdotool()
+    if not tool or not wid:
+        return False
+    proc = _run([tool, "windowactivate", str(int(wid))])
+    return proc is not None and proc.returncode == 0
 
 
 def close(wid: int, kill: bool = False) -> bool:
@@ -179,7 +345,8 @@ def move(wid: int, x: int, y: int) -> bool:
     tool = _xdotool()
     if not tool or not wid:
         return False
-    proc = _run([tool, "windowmove", str(int(wid)), str(int(x)), str(int(y))])
+    proc = _run([tool, "windowmove", str(int(wid)), str(int(x)),
+                 str(int(y))])
     return proc is not None and proc.returncode == 0
 
 

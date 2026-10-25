@@ -3,6 +3,7 @@
 The live X11/XWayland behavior itself (search/focus via xdotool) is proven on
 KDE Plasma 6.7 + Hyprland shells; these tests pin the wrapper branching.
 """
+import os
 import subprocess
 from ahk_bridge.parser import parse_script
 from ahk_bridge.runtime import Runtime
@@ -14,17 +15,28 @@ class _Done(Exception):
 
 
 def _run_with_fake(monkeypatch, search_out, which=True):
-    import ahk_bridge.runtime as Rmod
+    monkeypatch.setenv("DISPLAY", ":0")
 
     def fake_which(name):
         return "/usr/bin/xdotool" if (which and name == "xdotool") else None
 
     def fake_run(cmd, **kw):
-        if cmd[:2] == ["xdotool", "search"]:
+        tool = os.path.basename(str(cmd[0]))
+        action = cmd[1] if len(cmd) > 1 else ""
+        if tool == "xdotool" and action == "search":
             return subprocess.CompletedProcess(cmd, 0, search_out, "")
-        if cmd[:2] == ["xdotool", "windowactivate"]:
+        if tool == "xdotool" and action == "getwindowgeometry":
+            return subprocess.CompletedProcess(
+                cmd, 0, "X=10\nY=20\nWIDTH=800\nHEIGHT=600\n", "")
+        if tool == "xdotool" and action == "getwindowname":
+            return subprocess.CompletedProcess(cmd, 0, "AutoHotkey Dash\n", "")
+        if tool == "xdotool" and action == "getwindowclassname":
+            return subprocess.CompletedProcess(cmd, 0, "AutoHotkeyGUI\n", "")
+        if tool == "xdotool" and action == "getwindowpid":
+            return subprocess.CompletedProcess(cmd, 0, str(os.getpid()), "")
+        if tool == "xdotool" and action == "windowactivate":
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[:1] == ["hyprctl"]:
+        if tool == "hyprctl":
             return subprocess.CompletedProcess(cmd, 1, "", "no hyprland")
         raise AssertionError(f"unexpected: {cmd}")
 
