@@ -77,6 +77,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   character index.
 - `MsgBox`, live `PixelSearch` (mss, `FoundX`/`FoundY`), image search,
   screen capture and `WinActivate` (Hyprland match, else logged).
+  Continuation sections attached to a `MsgBox` (Natro's multi-line
+  warnings) belong to that command, including as a braceless `if` body.
 - GUI: `Gui`, controls, tabs, `Show`/`Submit`, events, absolute and
   relative positioning; lazy PySide6 with headless fallback.
 - OS bridge: clipboard, `WinExist`/`WinGetPos`/`WinGetClientPos`/

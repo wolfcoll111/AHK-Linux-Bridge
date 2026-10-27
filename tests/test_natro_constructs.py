@@ -21,6 +21,40 @@ def types(sim):
     return [e[1] for e in sim.log if e[0] == "type"]
 
 
+def test_msgbox_continuation_section_is_one_statement():
+    # Natro writes the deprecated-pattern warnings as a bare MsgBox followed
+    # by a continuation section.  The section must belong to that command,
+    # including when the command is the braceless body of an `if`.
+    sc = parse_script(
+        "if cond\n"
+        "MsgBox\n"
+        "(\n"
+        "'hello (ok)'\n"
+        "), \"Error\", 0x10\n")
+    assert len(sc.auto_section) == 1
+    node = sc.auto_section[0]
+    assert type(node).__name__ == "If"
+    assert [type(child).__name__ for child in node.then_body] == ["MsgBox"]
+    assert node.then_body[0].text == "hello (ok)"
+
+
+def test_msgbox_continuation_section_respects_if_condition():
+    _sc, rt, _sim = run(
+        "cond := 0\n"
+        "if cond\n"
+        "MsgBox\n"
+        "(\n"
+        "'hidden text'\n"
+        "), \"Error\", 0x10\n"
+        "MsgBox\n"
+        "(\n"
+        "'shown text'\n"
+        ")\n")
+    rt.run_auto()
+    assert not any("hidden text" in line for line in rt.logs)
+    assert any("shown text" in line for line in rt.logs)
+
+
 def test_switch_matches():
     sc, rt, sim = run('x := 2\nSwitch x {\nCase 1:\nSend "one"\nCase 2:\nSend "two"\nDefault:\nSend "other"\n}\n')
     rt.run_auto()

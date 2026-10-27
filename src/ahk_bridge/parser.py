@@ -1508,6 +1508,18 @@ def _parse_case_statement(lines: list[str], i: int):
             j += 1
         if j < n and lines[j].strip() == "}" and inner and any(":" in p for p in inner):
             return Assign(mo.group(1), "{" + " ".join(inner) + "}"), j + 1
+    # `MsgBox` + continuation section: the section is part of the command
+    # line, so its text belongs to this MsgBox (including when it is the
+    # single-statement body of an `if`).  Treating the section as a separate
+    # statement made the text run unconditionally and left trailing
+    # `), "Error", ...` options as a raw statement.
+    mcs = re.match(r'(?i)^msgbox\s*$', code)
+    if mcs and i + 1 < len(lines):
+        section = lines[i + 1].strip()
+        if section.startswith("("):
+            close = _scan_balanced(section, 0, "(", ")")
+            if close > 0:
+                return MsgBox(_unquote(section[1:close - 1].strip())), i + 2
     st = parse_statement(raw)
     if isinstance(st, FuncCall) and re.match(r'^[A-Za-z_]\w*$', st.name or ""):
         # Allman function definition: `Name(args)` + `{` on the next line.
