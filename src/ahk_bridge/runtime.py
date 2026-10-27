@@ -364,6 +364,42 @@ class AhkFile:
         self.close()
 
 
+def _resolve_ci_path(path: str) -> str:
+    """Return the on-disk spelling of ``path`` using Windows-style lookup.
+
+    Windows file systems are case-insensitive and case-preserving; Natro
+    builds names such as ``paths/gtc-windshrine.ahk`` while the file is
+    stored as ``gtc-WindShrine.ahk``.  Exact names win; otherwise each
+    component is matched case-insensitively against its parent directory.
+    Unresolvable paths are returned unchanged so callers can still create
+    files with the requested spelling.
+    """
+    if os.path.exists(path):
+        return path
+    prefix = os.sep if os.path.isabs(path) else ""
+    parts = path.lstrip(os.sep).split(os.sep)
+    current = prefix
+    for index, part in enumerate(parts):
+        if not part:
+            continue
+        candidate = os.path.join(current, part) if current else part
+        if os.path.exists(candidate):
+            current = candidate
+            continue
+        if any(ch in part for ch in "*?["):
+            rest = os.sep.join(parts[index:])
+            return os.path.join(current, rest) if current else rest
+        try:
+            entries = os.listdir(current or ".")
+        except OSError:
+            return path
+        matches = [entry for entry in entries if entry.lower() == part.lower()]
+        if len(matches) != 1:
+            return path
+        current = os.path.join(current, matches[0]) if current else matches[0]
+    return current or path
+
+
 def _has_cmp_op(s: str) -> bool:
     """True when s contains a comparison operator outside string literals
     (`~=`, `<=`, `>=`, `==`, `!=`, or lone `=`/`<`/`>` not part of `:=`)."""
@@ -553,9 +589,11 @@ class Runtime:
             text = text[1:-1]
         text = os.path.expanduser(text.replace("\\", os.sep))
         if os.path.isabs(text):
-            return os.path.normpath(text)
-        base = str(self.vars.get("A_WorkingDir") or os.getcwd())
-        return os.path.normpath(os.path.join(base, text))
+            resolved = os.path.normpath(text)
+        else:
+            base = str(self.vars.get("A_WorkingDir") or os.getcwd())
+            resolved = os.path.normpath(os.path.join(base, text))
+        return _resolve_ci_path(resolved)
 
     # -- exit callbacks --
     @staticmethod

@@ -460,6 +460,30 @@ def test_file_builtins_and_relative_working_directory(tmp_path):
     assert os.path.exists(tmp_path / "sub") is False
 
 
+def test_windows_case_insensitive_file_lookup(tmp_path):
+    # Natro builds `paths/gtc-windshrine.ahk` from config, but the file is
+    # stored as `gtc-WindShrine.ahk`. Windows resolves that; Linux must
+    # mimic the case-insensitive, case-preserving lookup.
+    base = str(tmp_path)
+    (tmp_path / "paths").mkdir()
+    (tmp_path / "paths" / "gtc-WindShrine.ahk").write_text(
+        'loaded := "wind"', encoding="utf-8")
+    (tmp_path / "patterns").mkdir()
+    (tmp_path / "patterns" / "CornerXSnake.ahk").write_bytes(b"x")
+    text = (
+        f'f := FileOpen("{base}\\paths\\gtc-windshrine.ahk", "r")\n'
+        'content := f.Read(), f.Close()\n'
+        f'Send FileExist("{base}\\PATHS\\GTC-windshrine.AHK")\n'
+        f'Send FileExist("{base}\\patterns\\cornerxsnake.ahk")\n'
+        f'Send FileExist("{base}\\paths\\gtc-missing.ahk")\n'
+        'Send content\n'
+    )
+    sc, rt, sim = run(text, working_dir=base)
+    rt.run_auto()
+    assert types(sim) == ["A", "A", 'loaded := "wind"']
+    assert not any("FileOpen failed" in entry for entry in rt.logs)
+
+
 def test_type_conversions_and_environment_builtins(monkeypatch):
     monkeypatch.delenv("AHK_BRIDGE_TEST_VAR", raising=False)
     sc, rt, sim = run(
