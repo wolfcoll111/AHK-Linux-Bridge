@@ -265,6 +265,7 @@ class FuncDef:
     name: str
     params: list
     body: list = field(default_factory=list)
+    defaults: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -337,6 +338,31 @@ def _parse_args(argstr: str) -> list:
         if argstr.strip() != "":
             parts.append(_unquote(cur))
     return parts
+
+
+def _parse_param_list(raw_params: str) -> tuple[list, dict]:
+    """Split an AHK parameter list into names and raw default expressions.
+
+    `unset` is kept as a default so the runtime can leave the parameter
+    genuinely unset (IsSet()==0) instead of binding a value.
+    """
+    names, defaults = [], {}
+    for part in _split_seq(raw_params or ""):
+        p = part.strip()
+        if not p:
+            continue
+        p = p.lstrip("&").strip()
+        name, sep, default = p.partition(":=")
+        if not sep:
+            name, sep, default = p.partition("=")
+        name = name.strip().rstrip("?*").strip()
+        if not name:
+            continue
+        name = name.split()[0]
+        names.append(name)
+        if sep and default.strip():
+            defaults[name] = default.strip()
+    return names, defaults
 
 
 def _strip_comment(line: str) -> str:
@@ -1028,14 +1054,10 @@ def parse_statement(line: str):
             raw_args = [p for p in raw_args if p != ""]
         if rest.startswith("=>"):
             # fat-arrow definition: Name(params) => expr
-            _params = []
-            for _a in _parse_args(argstr):
-                _seg = str(_a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
-                _seg = _seg.rstrip("?*").strip()
-                if _seg.split():
-                    _params.append(_seg.split()[0])
+            _params, _defaults = _parse_param_list(argstr)
             _expr = rest[2:].strip()
-            return FuncDef(name, _params, [Return(_expr if _expr else None)])
+            return FuncDef(name, _params,
+                           [Return(_expr if _expr else None)], _defaults)
         # dotted method chain glued to THIS call: `obj.M().N()` (rest starts
         # with `.`). Keep the whole raw expression; the runtime evaluates
         # each chain link with its own argument list. The old
@@ -1258,16 +1280,9 @@ def _parse_case_statement(lines: list[str], i: int):
     code = _strip_comment(raw).strip()
     mf = FUNCDEF_RE.match(code)
     if mf and mf.group(1).lower() not in _KEYWORDS:
-        params = [p.strip() for p in mf.group(2).split(",") if p.strip()]
-        clean = []
-        for p in params:
-            p = p.lstrip("&").strip()
-            p = p.split(":=")[0].strip().split("=")[0].strip()
-            p = p.rstrip("?*").strip()
-            if p.split():
-                clean.append(p.split()[0])
+        clean, defaults = _parse_param_list(mf.group(2))
         body, i, _ = _parse_block(lines, i + 1)
-        return FuncDef(mf.group(1), clean, body), i
+        return FuncDef(mf.group(1), clean, body, defaults), i
     # Named arrow function with a block body: `Name(args) => { ... }`.
     # Without this, the arrow body's `}` closed the *enclosing* function and
     # the rest of that function leaked into the auto-execute section (seen in
@@ -1285,12 +1300,7 @@ def _parse_case_statement(lines: list[str], i: int):
                 if _j < len(lines) and lines[_j].strip() == "{":
                     _body_at = _j + 1
             if _body_at is not None:
-                _params = []
-                for _a in _parse_args(_aargs):
-                    _seg = str(_a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
-                    _seg = _seg.rstrip("?*").strip()
-                    if _seg.split():
-                        _params.append(_seg.split()[0])
+                _params, _defaults = _parse_param_list(_aargs)
                 # `Name() => { key: value, ... }` is an arrow returning an
                 # object literal, not a block body.  HashFile uses this for
                 # its synthetic HCRYPTPROV/HCRYPTHASH handles.  A block body
@@ -1313,25 +1323,19 @@ def _parse_case_statement(lines: list[str], i: int):
                     _first)
                 if _obj_close is not None and _looks_obj:
                     return FuncDef(_aname, _params,
-                                   [Return("{" + " ".join(_obj_lines) + "}")]), _obj_close + 1
+                                   [Return("{" + " ".join(_obj_lines) + "}")],
+                                   _defaults), _obj_close + 1
                 _body, _ni, _ = _parse_block(lines, _body_at)
-                return FuncDef(_aname, _params, _body), _ni
+                return FuncDef(_aname, _params, _body, _defaults), _ni
     mc = CLASS_RE.match(code)
     if mc:
         body, i, _ = _body_after_opener(lines, i + 1, _has_brace(code))
         return Class(mc.group(1), mc.group(2), body), i
     mm = METHODDEF_RE.match(code)
     if mm and mm.group(1).lower() not in _KEYWORDS:
-        params = [p.strip() for p in mm.group(2).split(",") if p.strip()]
-        clean = []
-        for p in params:
-            p = p.lstrip("&").strip()
-            p = p.split(":=")[0].strip().split("=")[0].strip()
-            p = p.rstrip("?*").strip()
-            if p.split():
-                clean.append(p.split()[0])
+        clean, defaults = _parse_param_list(mm.group(2))
         body, i, _ = _parse_block(lines, i + 1)
-        return FuncDef(mm.group(1), clean, body), i
+        return FuncDef(mm.group(1), clean, body, defaults), i
     # Allman method form: `Name(args)` / `static Name(args)` + `{` next line.
     _mcode = re.sub(r'^(?:static|public|private)\s+', '', code, flags=re.IGNORECASE)
     _mmc = _match_call(_mcode)
@@ -1342,15 +1346,9 @@ def _parse_case_statement(lines: list[str], i: int):
             while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith(";")):
                 j += 1
             if j < len(lines) and lines[j].strip() == "{":
-                _raw_args = [p.strip() for p in _split_seq(_mmc[1])] if _mmc[1].strip() else []
-                fn_params = []
-                for a in _raw_args:
-                    seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
-                    seg = seg.rstrip("?*").strip()
-                    if seg.split():
-                        fn_params.append(seg.split()[0])
+                fn_params, fn_defaults = _parse_param_list(_mmc[1])
                 body, k, _ = _parse_block(lines, j + 1)
-                return FuncDef(_mname, fn_params, body), k
+                return FuncDef(_mname, fn_params, body, fn_defaults), k
     ms = STATIC_ASSIGN_RE.match(code)
     if ms:
         st = parse_statement(ms.group(1))
@@ -1528,27 +1526,17 @@ def _parse_case_statement(lines: list[str], i: int):
         # Allman function definition: `Name(args)` + `{` on the next line.
         # (A bare call is never directly followed by a brace block in AHK.)
         if st.name.lower() not in _KEYWORDS:
-            fn_params = []
-            for a in (st.args or []):
-                seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
-                seg = seg.rstrip("?*").strip()
-                if seg.split():
-                    fn_params.append(seg.split()[0])
             j = i + 1
             while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith(";")):
                 j += 1
             if j < len(lines) and lines[j].strip() == "{":
                 body, k, _ = _parse_block(lines, j + 1)
-                # params from the def line: re-derive from raw call text
+                # params from the def line: re-derive from the raw call text
                 mc0 = _match_call(raw)
+                fn_params, fn_defaults = ([], {})
                 if mc0 is not None:
-                    fn_params = []
-                    for a in _parse_args(mc0[1]):
-                        seg = str(a).lstrip("&").strip().split(":=")[0].split("=")[0].strip()
-                        seg = seg.rstrip("?*").strip()
-                        if seg.split():
-                            fn_params.append(seg.split()[0])
-                return FuncDef(st.name, fn_params, body), k
+                    fn_params, fn_defaults = _parse_param_list(mc0[1])
+                return FuncDef(st.name, fn_params, body, fn_defaults), k
     return st, i + 1
 
 

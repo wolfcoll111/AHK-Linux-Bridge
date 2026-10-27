@@ -195,6 +195,38 @@ def test_bind_quoted_string_is_not_a_function_reference():
     assert "method .bind() unsupported (logged)" in rt.logs
 
 
+def test_default_params_apply_and_override():
+    _sc, rt, sim = run(
+        "Add(a, b := 10) {\n"
+        "    Send b\n"
+        "}\n"
+        "Add(5)\n"
+        "Add(5, 2)\n")
+    rt.run_auto()
+    assert types(sim) == ["10", "2"]
+
+
+def test_default_param_may_reference_earlier_param():
+    _sc, rt, sim = run(
+        "Echo(a, b := a) {\n"
+        "    Send b\n"
+        "}\n"
+        "Echo(7)\n")
+    rt.run_auto()
+    assert types(sim) == ["7"]
+
+
+def test_unset_default_keeps_param_unset():
+    _sc, rt, sim = run(
+        "Probe(a, b := unset) {\n"
+        "    Send IsSet(b)\n"
+        "}\n"
+        "Probe(1)\n"
+        "Probe(1, 2)\n")
+    rt.run_auto()
+    assert types(sim) == ["0", "1"]
+
+
 def test_keywait_timeout_sleeps():
     sc, rt, sim = run('KeyWait "LButton", "D T1"\n')
     rt.run_auto()

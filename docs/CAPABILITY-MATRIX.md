@@ -124,6 +124,7 @@ instead of pretending success.
 |---|---|---|---|
 | `Fn.Bind(args...)` / BoundFunc partial application | **Implemented with limitation** | `_bind_target()` and `BoundFunc` evaluate the bound arguments once, prepend them to every later call, and dispatch through the normal function/builtin path; `test_bind_builtin_freezes_args_and_calls_later`, `test_bind_user_function_prepends_frozen_args` | Function references are name-based rather than real AHK Func objects. A quoted string is not a function reference and still logs `.bind() unsupported`; binding an undefined name defers to the normal explicit `stub builtin` log; nested `Bind` on a BoundFunc is not modelled. |
 | Multi-line continuations with inline comments | **Implemented** | `_join_continuations_mapped()` joins open parens/brackets, trailing operators and leading `.`/`,`/operator lines, stripping each physical line's `;` comment while preserving quoted text; `test_static_map_continuation_with_inline_comments_enumerates` | — |
+| Function/method parameter defaults | **Implemented** | `FuncDef.defaults` is captured for normal, arrow, nested and class-method definitions; omitted arguments evaluate their default in declaration order (`Echo(a, b := a)` works); `test_default_params_apply_and_override`, `test_default_param_may_reference_earlier_param`, `test_unset_default_keeps_param_unset` | `p := unset` leaves the parameter genuinely unset so `IsSet(p)` is `0`. Required-parameter arity is still not enforced; missing required parameters simply stay unset. |
 
 ## Safety, observability and non-goals
 

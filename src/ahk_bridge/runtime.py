@@ -1745,8 +1745,17 @@ class Runtime:
                 return self.vars[key].call(c.args)
             return self._builtin(c)
         saved = dict(self.vars)
-        for p, a in zip(fn.params, c.args):
-            self.vars[p] = self._eval_expr(a)
+        defaults = getattr(fn, "defaults", None) or {}
+        for index, p in enumerate(fn.params):
+            if index < len(c.args):
+                self.vars[p] = self._eval_expr(c.args[index])
+            elif p in defaults:
+                default = defaults[p]
+                if str(default).strip().lower() == "unset":
+                    # AHK's `p := unset`: omitted means genuinely unset.
+                    self.vars.pop(p, None)
+                else:
+                    self.vars[p] = self._eval_expr(default)
         try:
             self._exec_block(fn.body)
             return ""

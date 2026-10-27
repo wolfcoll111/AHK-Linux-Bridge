@@ -71,7 +71,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `MouseClick`, `MouseMove`, `Sleep`.
 - `Loop N-or-var {}` / `Loop {}`, `While`, `If`/`Else If`/`Else`, `For`,
   `Switch` (including inline `Case 1: stmt`), `Try`/`Catch`/`Finally`,
-  `Break`/`Continue`, functions, classes and includes.
+  `Break`/`Continue`, functions with parameter defaults (including
+  `unset`), classes and includes.
 - `x := expr`, arrow functions returning object literals, objects,
   arrays, maps, case-insensitive variables, `Fn.Bind(...)` partial
   application, and `StrSplit` by delimiter or character index.
