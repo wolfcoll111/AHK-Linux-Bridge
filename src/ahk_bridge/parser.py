@@ -1525,6 +1525,16 @@ def _parse_case_statement(lines: list[str], i: int):
             close = _scan_balanced(section, 0, "(", ")")
             if close > 0:
                 return MsgBox(_unquote(section[1:close - 1].strip())), i + 2
+    # `Run` + continuation section: the section is the command's expression
+    # argument (Natro builds the Status.ahk command line this way), so join
+    # it before parsing instead of leaving `( ... )` as a raw statement.
+    mrs = re.match(r'(?i)^run\s*$', code)
+    if mrs and i + 1 < len(lines):
+        section = lines[i + 1].strip()
+        if section.startswith("(") and _scan_balanced(section, 0, "(", ")") > 0:
+            st = parse_statement(code + " " + section)
+            if st is not None:
+                return st, i + 2
     st = parse_statement(raw)
     if isinstance(st, FuncCall) and re.match(r'^[A-Za-z_]\w*$', st.name or ""):
         # Allman function definition: `Name(args)` + `{` on the next line.

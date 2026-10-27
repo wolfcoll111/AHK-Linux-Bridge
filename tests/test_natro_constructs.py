@@ -55,6 +55,26 @@ def test_msgbox_continuation_section_respects_if_condition():
     assert any("shown text" in line for line in rt.logs)
 
 
+def test_run_continuation_section_evaluates_concat_expression():
+    # Natro builds the Status.ahk command line as `Run` + a parenthesized
+    # continuation section whose quoted/var parts form one expression.
+    text = (
+        'exe := "/bin/echo"\n'
+        'word := "hello"\n'
+        'Run\n'
+        '(\n'
+        "'\"' exe '\" ' word\n"
+        ')\n'
+    )
+    sc = parse_script(text)
+    assert not any(getattr(node, "name", "") == "__raw__"
+                   for node in sc.auto_section)
+    _sc, rt, _sim = run(text, allow_processes=False)
+    rt.run_auto()
+    assert any("process spawning disabled" in entry
+               and '"/bin/echo" hello' in entry for entry in rt.logs)
+
+
 def test_switch_matches():
     sc, rt, sim = run('x := 2\nSwitch x {\nCase 1:\nSend "one"\nCase 2:\nSend "two"\nDefault:\nSend "other"\n}\n')
     rt.run_auto()
