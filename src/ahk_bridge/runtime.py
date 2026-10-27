@@ -1949,8 +1949,7 @@ class Runtime:
                               if removed is _VALUELESS else removed)
             if m == "insertat":
                 try:
-                    raw_index = int(val(0))
-                    index = len(obj) if raw_index == 0 else raw_index - 1
+                    index = self._array_index(val(0), len(obj), insert=True)
                     values = [val(i) for i in range(1, len(raw_args))]
                     if 0 <= index <= len(obj):
                         obj[index:index] = values
@@ -1958,9 +1957,20 @@ class Runtime:
                 except (TypeError, ValueError):
                     pass
                 return True, ""
-            if m in ("removeat", "delete"):
+            if m == "delete":
                 try:
-                    index = int(val(0)) - 1
+                    index = self._array_index(val(0), len(obj))
+                    if 0 <= index < len(obj):
+                        removed = obj[index]
+                        obj[index] = _VALUELESS
+                        return True, (self._array_default_value(obj)
+                                      if removed is _VALUELESS else removed)
+                except (TypeError, ValueError):
+                    pass
+                return True, ""
+            if m == "removeat":
+                try:
+                    index = self._array_index(val(0), len(obj))
                     if 0 <= index < len(obj):
                         removed = obj.pop(index)
                         return True, (self._array_default_value(obj)
@@ -1970,7 +1980,7 @@ class Runtime:
                 return True, ""
             if m == "has":
                 try:
-                    index = int(val(0)) - 1
+                    index = self._array_index(val(0), len(obj))
                     if 0 <= index < len(obj):
                         return True, 0 if obj[index] is _VALUELESS else 1
                 except (TypeError, ValueError):
@@ -4563,7 +4573,7 @@ class Runtime:
         if hasattr(obj, "ahk_get"):
             return obj.ahk_get(key)
         if isinstance(obj, (list, tuple)):
-            i = int(key) - 1
+            i = self._array_index(key, len(obj))
             if not 0 <= i < len(obj):
                 raise IndexError(f"array index {key} out of range")
             value = obj[i]
@@ -4589,6 +4599,17 @@ class Runtime:
         if entry is not None and entry[0] is obj:
             return entry[1]
         return ""
+
+    @staticmethod
+    def _array_index(index, length, *, insert: bool = False) -> int:
+        """AHK array index: 1-based, negative counts from the end.
+
+        InsertAt additionally accepts 0 as Length+1.
+        """
+        n = int(index)
+        if insert and n == 0:
+            return length
+        return length + n if n < 0 else n - 1
 
     @staticmethod
     def _case_sense_flag(value) -> bool:
@@ -4619,7 +4640,7 @@ class Runtime:
             obj.ahk_set(key, val)
             return
         if isinstance(obj, list) and kind == "idx":
-            i = int(key) - 1
+            i = self._array_index(key, len(obj))
             if 0 <= i < len(obj):
                 obj[i] = val
                 return

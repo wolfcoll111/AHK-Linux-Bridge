@@ -593,6 +593,53 @@ def test_mondo_action_list_array_properties_apply_in_build_statement():
     assert not any("assign-target" in line for line in rt.logs)
 
 
+def test_array_delete_leaves_a_valueless_index():
+    # AHK Array.Delete does not shift; it leaves the index without a value,
+    # so Length stays and reads fall back to Default.
+    _sc, rt, _sim = run(
+        'a := ["a", "b", "c"]\n'
+        'a.Default := "?"\n'
+        "removed := a.Delete(2)\n"
+        "n := a.Length\n"
+        "second := a[2]\n"
+        "h := a.Has(2)\n"
+        "third := a[3]\n"
+    )
+    rt.run_auto()
+    assert rt.vars["removed"] == "b"
+    assert rt.vars["n"] == 3
+    assert rt.vars["second"] == "?"
+    assert rt.vars["h"] == 0
+    assert rt.vars["third"] == "c"
+
+
+def test_negative_array_indexes_address_from_the_end():
+    _sc, rt, _sim = run(
+        'a := ["a", "b", "c"]\n'
+        "last := a[-1]\n"
+        "second := a[-2]\n"
+        'a[-1] := "z"\n'
+        "changed := a[3]\n"
+        "h := a.Has(-1)\n"
+        "removed := a.RemoveAt(-1)\n"
+        "n := a.Length\n"
+        'a.InsertAt(-1, "y")\n'
+        "i1 := a[1]\n"
+        "i2 := a[2]\n"
+        "i3 := a[3]\n"
+    )
+    rt.run_auto()
+    assert rt.vars["last"] == "c"
+    assert rt.vars["second"] == "b"
+    assert rt.vars["changed"] == "z"
+    assert rt.vars["h"] == 1
+    assert rt.vars["removed"] == "z"
+    assert rt.vars["n"] == 2
+    assert rt.vars["i1"] == "a"
+    assert rt.vars["i2"] == "y"
+    assert rt.vars["i3"] == "b"
+
+
 def test_push_insertat_and_map_set_accept_multiple_values():
     # Natro's Mondo build pushes "Tag", "Guid" in one call; AHK v2 collection
     # methods take variadic values.
