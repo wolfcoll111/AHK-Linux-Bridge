@@ -1006,10 +1006,13 @@ def parse_statement(line: str):
     # Complex assignment targets: `obj.prop := v`, `arr[i] := v`, and
     # `(ctrl := Gui.Add(...)).Section := "Gather"` / `Gui.Add(...).Text := v`.
     # Keep the whole line as an expression statement so the runtime can
-    # evaluate the LHS and store through the real object.
+    # evaluate the LHS and store through the real object.  A fat-arrow
+    # definition whose body is itself an assignment (`f(p) => obj.p := v`)
+    # is not an assignment statement; let _match_call register the function.
     _assign_parts = _split_top(s, ":=")
     if (len(_assign_parts) == 2 and _assign_parts[0].strip()
             and _assign_parts[1].strip()
+            and "=>" not in _assign_parts[0]
             and not re.fullmatch(r"[A-Za-z_]\w*", _assign_parts[0].strip())):
         return ExprStmt(s)
     mc = _match_call(s)
