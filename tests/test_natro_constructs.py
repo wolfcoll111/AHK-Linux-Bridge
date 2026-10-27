@@ -593,6 +593,37 @@ def test_mondo_action_list_array_properties_apply_in_build_statement():
     assert not any("assign-target" in line for line in rt.logs)
 
 
+def test_push_insertat_and_map_set_accept_multiple_values():
+    # Natro's Mondo build pushes "Tag", "Guid" in one call; AHK v2 collection
+    # methods take variadic values.
+    _sc, rt, _sim = run(
+        "a := []\n"
+        'n := a.Push("Tag", "Guid")\n'
+        "first := a[1]\n"
+        "second := a[2]\n"
+        "m := Map()\n"
+        'm.Set("a", 1, "b", 2)\n'
+        "mc := m.Count\n"
+        "ins := [1]\n"
+        'ins.InsertAt(1, "x", "y")\n'
+        "i1 := ins[1]\n"
+        "i2 := ins[2]\n"
+        "i3 := ins[3]\n"
+        "tail := []\n"
+        'tail.InsertAt(0, "end")\n'
+        "t1 := tail[1]\n"
+    )
+    rt.run_auto()
+    assert rt.vars["n"] == 2
+    assert rt.vars["first"] == "Tag"
+    assert rt.vars["second"] == "Guid"
+    assert rt.vars["mc"] == 2
+    assert rt.vars["i1"] == "x"
+    assert rt.vars["i2"] == "y"
+    assert rt.vars["i3"] == 1
+    assert rt.vars["t1"] == "end"
+
+
 def test_map_default_and_count_properties_stay_out_of_key_space():
     # Natro's digit readers do `(digits := Map()).Default := ""` and then
     # branch on digits.Count; neither the Default nor Count property may

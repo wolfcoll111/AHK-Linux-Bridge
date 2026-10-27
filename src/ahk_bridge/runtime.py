@@ -1929,7 +1929,8 @@ class Runtime:
                     return True, obj.default
                 return True, ""
             if m == "set":
-                obj[self._map_key(obj, val(0))] = val(1)
+                for i in range(0, len(raw_args) - 1, 2):
+                    obj[self._map_key(obj, val(i))] = val(i + 1)
                 return True, obj
             if m in ("count", "length"):
                 return True, len(obj)
@@ -1937,7 +1938,8 @@ class Runtime:
                 return True, list(obj.items())
         if isinstance(obj, list):
             if m == "push":
-                obj.append(val(0))
+                for i in range(len(raw_args)):
+                    obj.append(val(i))
                 return True, len(obj)
             if m == "pop":
                 if not obj:
@@ -1947,9 +1949,11 @@ class Runtime:
                               if removed is _VALUELESS else removed)
             if m == "insertat":
                 try:
-                    index = int(val(0)) - 1
+                    raw_index = int(val(0))
+                    index = len(obj) if raw_index == 0 else raw_index - 1
+                    values = [val(i) for i in range(1, len(raw_args))]
                     if 0 <= index <= len(obj):
-                        obj.insert(index, val(1))
+                        obj[index:index] = values
                         return True, ""
                 except (TypeError, ValueError):
                     pass
