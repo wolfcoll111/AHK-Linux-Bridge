@@ -530,6 +530,69 @@ def test_map_and_array_methods_and_for_pairs():
     assert types(sim) == ["1", "0", "2", "1", "0", "3", "3", "9", "1", "b", "2"]
 
 
+def test_array_length_default_and_capacity_properties():
+    # AHK v2 arrays expose Length/Capacity/Default as assignable properties.
+    # Natro pads fixed-size arrays (Length := 20) and defines Default := ""
+    # so the valueless slots read as blank instead of erroring.
+    _sc, rt, _sim = run(
+        'a := ["Buff", "Kill"]\n'
+        'a.Default := ""\n'
+        "a.Length := 4\n"
+        "n := a.Length\n"
+        "a1 := a[1]\n"
+        "a3 := a[3]\n"
+        "h3 := a.Has(3)\n"
+        "a.Length := 1\n"
+        "tn := a.Length\n"
+        'b := ["x"]\n'
+        "b.Default := 7\n"
+        "b.Length := 3\n"
+        "b2 := b[2]\n"
+        'c := ["a", "b", "c"]\n'
+        "c.Capacity := 2\n"
+        "cn := c.Length\n"
+        'd := []\n'
+        'd.Default := ""\n'
+        "d.Length := 2\n"
+        'd[2] := "tail"\n'
+        "d1 := d[1]\n"
+        "d2 := d[2]\n"
+        "joined := \"\"\n"
+        "for v in d\n"
+        "    joined .= v\n"
+    )
+    rt.run_auto()
+    assert rt.vars["n"] == 4
+    assert rt.vars["a1"] == "Buff"
+    assert rt.vars["a3"] == ""
+    assert rt.vars["h3"] == 0
+    assert rt.vars["tn"] == 1
+    assert rt.vars["b2"] == 7
+    assert rt.vars["cn"] == 2
+    assert rt.vars["d1"] == ""
+    assert rt.vars["d2"] == "tail"
+    assert rt.vars["joined"] == "tail"
+    assert not any("cannot store into list" in line
+                   or "assign-target" in line for line in rt.logs)
+
+
+def test_mondo_action_list_array_properties_apply_in_build_statement():
+    # Verbatim Natro build statement: the comma-separated assignments must
+    # run against the same array without logging an assign-target failure.
+    _sc, rt, _sim = run(
+        "PMondoGuid := 0\n"
+        'MondoActionList := ["Buff", "Kill"], PMondoGuid && '
+        'MondoActionList.Push("Tag", "Guid"), MondoActionList.Default := "", '
+        "MondoActionList.Length := 4\n"
+        "n := MondoActionList.Length\n"
+        "last := MondoActionList[4]\n"
+    )
+    rt.run_auto()
+    assert rt.vars["n"] == 4
+    assert rt.vars["last"] == ""
+    assert not any("assign-target" in line for line in rt.logs)
+
+
 def test_static_map_continuation_with_inline_comments_enumerates():
     # Natro's path_names table spans physical lines and carries `;` comments
     # after some entries.  Comments must be dropped per physical line while

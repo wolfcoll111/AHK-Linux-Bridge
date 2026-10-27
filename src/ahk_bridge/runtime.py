@@ -24,6 +24,11 @@ from . import parser as P
 
 ABORT_KEYS = ("Escape", "Ctrl+Alt+C")
 
+# AHK arrays can gain indexes that have no value (Length increase, Delete).
+# Python lists cannot express that, so padded slots hold this marker and are
+# resolved through the array's Default property when read.
+_VALUELESS = object()
+
 
 class TargetError(RuntimeError):
     """AHK `TargetError`: a window/control required by a call was not found."""
@@ -608,6 +613,10 @@ class Runtime:
         self._static_scopes: dict[str, dict] = {}
         self._global_scope_names: set[str] = set()
         self._call_stack: list[dict] = []
+        # -- collection properties (v1.0) --
+        # id(array) -> (array, default value); the strong array reference
+        # keeps ids unique for the runtime's lifetime.
+        self._array_defaults: dict[int, tuple[list, object]] = {}
         self._index_nested_functions()
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
 
@@ -1900,7 +1909,11 @@ class Runtime:
                 obj.append(val(0))
                 return True, len(obj)
             if m == "pop":
-                return True, obj.pop() if obj else ""
+                if not obj:
+                    return True, ""
+                removed = obj.pop()
+                return True, (self._array_default_value(obj)
+                              if removed is _VALUELESS else removed)
             if m == "insertat":
                 try:
                     index = int(val(0)) - 1
@@ -1914,16 +1927,20 @@ class Runtime:
                 try:
                     index = int(val(0)) - 1
                     if 0 <= index < len(obj):
-                        return True, obj.pop(index)
+                        removed = obj.pop(index)
+                        return True, (self._array_default_value(obj)
+                                      if removed is _VALUELESS else removed)
                 except (TypeError, ValueError):
                     pass
                 return True, ""
             if m == "has":
                 try:
                     index = int(val(0)) - 1
-                    return True, 1 if 0 <= index < len(obj) else 0
+                    if 0 <= index < len(obj):
+                        return True, 0 if obj[index] is _VALUELESS else 1
                 except (TypeError, ValueError):
-                    return True, 0
+                    pass
+                return True, 0
             if m == "clone":
                 return True, list(obj)
             if m == "clear":
@@ -1932,7 +1949,9 @@ class Runtime:
             if m in ("count", "length"):
                 return True, len(obj)
             if m == "__enum":
-                return True, list(obj)
+                return True, [
+                    self._array_default_value(obj) if v is _VALUELESS else v
+                    for v in obj]
         if isinstance(obj, str) and m == "length":
             return True, len(obj)
         return False, None
@@ -4508,7 +4527,13 @@ class Runtime:
         if hasattr(obj, "ahk_get"):
             return obj.ahk_get(key)
         if isinstance(obj, (list, tuple)):
-            return obj[int(key) - 1]
+            i = int(key) - 1
+            if not 0 <= i < len(obj):
+                raise IndexError(f"array index {key} out of range")
+            value = obj[i]
+            if value is _VALUELESS:
+                return self._array_default_value(obj)
+            return value
         if isinstance(obj, str):
             return obj[int(key) - 1]
         if isinstance(obj, dict):
@@ -4518,8 +4543,13 @@ class Runtime:
         self._log_once(f"indexing {type(obj).__name__} not modeled (logged)")
         return ""
 
-    @staticmethod
-    def _store(obj, kind, key, val):
+    def _array_default_value(self, obj):
+        entry = self._array_defaults.get(id(obj))
+        if entry is not None and entry[0] is obj:
+            return entry[1]
+        return ""
+
+    def _store(self, obj, kind, key, val):
         if kind == "key" and hasattr(obj, "ahk_set_property"):
             obj.ahk_set_property(key, val)
             return
@@ -4532,6 +4562,26 @@ class Runtime:
                 obj[i] = val
                 return
             raise IndexError("list assignment out of range")
+        if isinstance(obj, list) and kind == "key":
+            prop = str(key).lower()
+            if prop == "length":
+                n = int(val)
+                if n < 0:
+                    raise ValueError("array Length cannot be negative")
+                if n < len(obj):
+                    del obj[n:]
+                elif n > len(obj):
+                    obj.extend([_VALUELESS] * (n - len(obj)))
+                return
+            if prop == "capacity":
+                n = int(val)
+                if n < len(obj):
+                    del obj[n:]
+                return
+            if prop == "default":
+                self._array_defaults[id(obj)] = (obj, val)
+                return
+            raise TypeError(f"cannot store array property {key}")
         if isinstance(obj, dict):
             obj[key] = val
             return
@@ -4873,7 +4923,8 @@ class Runtime:
         """
         val = self._eval_expr(expr)
         if isinstance(val, (list, tuple)):
-            return list(val)
+            return [self._array_default_value(val) if v is _VALUELESS else v
+                    for v in val]
         if isinstance(val, dict):
             return list(val.items()) if pairs else list(val.keys())
         if isinstance(val, (int, float)):
@@ -5274,6 +5325,12 @@ class Runtime:
                 if prop == "default":
                     return obj.default or ""
                 return getattr(obj, m.group(2), "")
+            if isinstance(obj, list):
+                if prop == "default":
+                    return self._array_default_value(obj)
+                if prop == "capacity":
+                    return len(obj)
+                return ""
             if isinstance(obj, (list, dict)) or (
                     isinstance(obj, str) and m.group(1).strip() in self.vars):
                 return ""

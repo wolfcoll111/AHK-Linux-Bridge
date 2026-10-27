@@ -74,7 +74,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `Break`/`Continue`, functions with parameter defaults (including
   `unset`), classes with static methods and includes.
 - `x := expr`, arrow functions returning object literals, objects,
-  arrays, maps, case-insensitive variables in expressions and
+  arrays with assignable `Length`/`Capacity`/`Default`, maps,
+  case-insensitive variables in expressions and
   concatenation (`A_index` reads `A_Index`), function-local scope with
   `global`/`static` declarations and nested-function closures,
   `Fn.Bind(...)` partial application, and `StrSplit` by delimiter or
