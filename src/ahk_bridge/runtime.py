@@ -4426,6 +4426,11 @@ class Runtime:
             self.logs.append(f"assign-target {lhs!r} unsupported (logged)")
             return
         base_expr, (kind, key_raw) = access
+        if (re.fullmatch(r"[A-Za-z_]\w*", base_expr)
+                and self._var_key(base_expr) is None):
+            self.logs.append(
+                f"assign-target {lhs!r} has no live container (logged)")
+            return
         try:
             obj = self._eval_expr(base_expr)
             key = self._eval_expr(key_raw) if kind == "idx" else key_raw

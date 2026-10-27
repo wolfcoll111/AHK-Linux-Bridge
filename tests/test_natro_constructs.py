@@ -593,6 +593,16 @@ def test_mondo_action_list_array_properties_apply_in_build_statement():
     assert not any("assign-target" in line for line in rt.logs)
 
 
+def test_assign_to_undefined_container_names_the_missing_base():
+    # Isolated corpus asset files assign into Maps that the main script owns.
+    # The diagnosis must say the container is missing, not "cannot store into
+    # int" from evaluating the undefined name as AHK-falsy 0.
+    _sc, rt, _sim = run('bitmaps["gifted"] := 1\n')
+    rt.run_auto()
+    assert any("has no live container" in line for line in rt.logs)
+    assert not any("cannot store into int" in line for line in rt.logs)
+
+
 def test_array_delete_leaves_a_valueless_index():
     # AHK Array.Delete does not shift; it leaves the index without a value,
     # so Length stays and reads fall back to Default.
