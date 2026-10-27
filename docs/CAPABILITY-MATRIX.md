@@ -1,6 +1,6 @@
 # Capability matrix — AHK v2 on Linux
 
-Status as of **v0.8** (2026-10-25). Every row is deliberately classified:
+Status as of **v1.0** (2026-10-27). Every row is deliberately classified:
 there is no `unknown` status. A surface either works natively, works with a
 named limitation, or is blocked and reports an explicit logged fallback
 instead of pretending success.
@@ -13,23 +13,28 @@ instead of pretending success.
 
 ## Evidence gate
 
-- `QT_QPA_PLATFORM=offscreen python -m pytest -q` → **266 passed**
-  (~6.4 s); no test performs a live desktop, clipboard, window or vision call.
+- `QT_QPA_PLATFORM=offscreen python -m pytest -q` → **345 passed**
+  (7.01 s); no test performs a live desktop, clipboard, window or vision call.
 - Real Natro `natro_macro.ahk` from a disposable copy:
-  **33 files, 1,489 auto statements, 620 functions, 1,878,792 expanded
-  chars**, startup **0 errors**, **813 controls**, **9 tab pages**,
-  `StartButton` enabled. Cold startup was **9.54 s** in the probe run.
-- 600 s steady-state soak (`soak_s` **600.011**): **0 startup errors**,
-  813 controls, 9 tabs, **925 variables**, **300 background-timer
-  callbacks**, mean absolute drift **3.278 ms** (p95 **7.028 ms**, max
-  **10.464 ms**), CPU **1.205 % of one core**, RSS **163.8 → 125.0 MB**
-  (peak **165.4 MB**), **0 timer callback errors**. Details in
-  `HANDOFF-v08-startup.md`.
-- Sandboxed census (`docs/CENSUS-v0.8.md`): **150 files, 672 functions,
-  21,269 nodes, 47 `__raw__` (0.22%), 0 parse crashes; 150/150 runtime,
-  0 timeouts, 0 load errors, 0 unknown load-bearing hits; 48 known
-  gaps** (windows-only 38, language-gap 8, setting-noop 7, cross-file 5,
-  external-service 2, parser-raw 1).
+  **33 files, 1,486 auto statements, 621 functions**, startup **0
+  errors**, **813 controls**, **9 tab pages**, `StartButton` enabled.
+  Parse **2.582 s**, cold startup **6.672 s**, **843 variables**, **101
+  logs**, `patternlist` **12**.
+- 600 s steady-state soak (`soak_s` **600.021**): **0 startup errors**,
+  813 controls, 9 tabs, **843 variables**, **300 timer fires / 300 timer
+  events**, **0 timer callback errors**, 1 new log
+  (`stub builtin nm_nightinterrupt()`), CPU **1.191 % of one core**, RSS
+  **166.5 → 168.2 MB** (peak **168.5 MB**). Details in `HANDOFF-v10.md`.
+- Sandboxed census (`docs/CENSUS-v1.0.md`): **150 files, 671 functions,
+  21,127 nodes, 28 `__raw__` (0.13%), 0 parse crashes; 150/150 runtime,
+  0 timeouts, 1 worker deadline stop (partial inventory), 0 load errors,
+  0 unknown load-bearing hits; 47 known gaps** (windows-only 38,
+  language-gap 7, setting-noop 7, cross-file 5, external-service 2,
+  parser-raw 1). The 7 language-gap hits are the standalone
+  `nm_image_assets/**/bitmaps.ahk` runs whose maps the including main
+  script normally creates (`Shrine` has no visible definition in the
+  corpus) plus Natro's COM-dependent `ExecQuery` loop; none blocks
+  main-script startup.
 
 ## Windows and controls
 
@@ -139,7 +144,7 @@ instead of pretending success.
 
 | Capability | Status | Linux implementation / evidence | Limitation |
 |---|---|---|---|
-| No silent stubs | **Implemented** | Every unsupported builtin/DllCall/control logs once and returns AHK-falsy; v0.8 census has **0 unknown load-bearing hits** and 48 explicit known gaps | Logs may be numerous for deliberately unported display/COM paths; they remain visible. |
+| No silent stubs | **Implemented** | Every unsupported builtin/DllCall/control logs once and returns AHK-falsy; v1.0 census has **0 unknown load-bearing hits** and 47 explicit known gaps | Logs may be numerous for deliberately unported display/COM paths; they remain visible. |
 | Missing window/control semantics | **Implemented** | `TargetError` on missing target; Natro `GetRobloxClientPos()` returns `0`; `test_missing_*` | No fake geometry. |
 | Census sandbox | **Implemented** | Copies the corpus to a temp tree, runs offscreen, disables clipboard/process spawning/desktop effects; `tools/natro_census.py` | Census results describe the corpus at that commit; they are not a live Roblox test. |
 | Native Windows ABI, PE loading, COM/WinRT, WinHttp, GDI+ rendering | **Blocked/external** | Documented in the rows above | Use Wine/AutoHotkey for parity when a surface genuinely requires Windows. This is a design boundary, not a hidden stub. |

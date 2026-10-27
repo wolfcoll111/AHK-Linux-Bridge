@@ -2,10 +2,12 @@
 
 Run Windows-style AHK v2 farming/productivity macros on Linux with one
 input API that routes to **uinput** (universal) or **XTest** (X11
-fallback). **v0.8** starts the real Natro macro end-to-end on a
-disposable copy: config, includes, GUI, timers and steady-state loop.
-The **v1.0 capability matrix** records the remaining Linux boundaries
-explicitly.
+fallback). **v1.0** starts the real Natro macro end-to-end on a
+disposable copy — config, includes, GUI, timers and steady-state loop —
+with the v2 language/OS surface Natro relies on (Array/Map properties,
+function scope/statics/closures, class statics, parameter defaults,
+`Bind`, window waits and lists). The **capability matrix** records the
+remaining Linux boundaries explicitly.
 
 ## Status
 
@@ -22,14 +24,20 @@ explicitly.
   offscreen steady-state soak measured CPU, RSS, timer fires and timer
   drift (see `HANDOFF-v08-startup.md`). No live desktop, game or real
   Natro tree was touched.
+- **v1.0:** the v2 language/OS surface above Natro's startup, plus a
+  fresh sandboxed run: 33 files / **1,486 auto statements / 621
+  functions**, 0 startup errors, 813 controls, 9 tabs, 843 variables; a
+  600 s soak with **300 timer fires, 0 callback errors**, **1.191 % of
+  one core** and peak RSS **168.5 MB**. The census reports **0 unknown
+  load-bearing hits** and **47 known gaps** (see `HANDOFF-v10.md`).
 - Native Wayland surfaces have no foreign HWND. Target XWayland windows or
   use compositor/portal data; the bridge reports the limitation instead of
   inventing a handle.
 
-The v1.0 matrix is published at `docs/CAPABILITY-MATRIX.md`; every row is
+The matrix is published at `docs/CAPABILITY-MATRIX.md`; every row is
 **Implemented**, **Implemented with limitation**, or **Blocked/external**.
-Evidence lives in `HANDOFF-v08-startup.md`, `docs/CENSUS-v0.8.md` and the
-266-test suite.
+Evidence lives in `HANDOFF-v10.md`, `docs/CENSUS-v1.0.md` and the
+345-test suite.
 
 ## Quickstart
 
@@ -63,7 +71,7 @@ ahk-bridge windows "ahk_exe RobloxPlayerBeta.exe"
 ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
 ```
 
-## AHK v2 surface (v0.8)
+## AHK v2 surface (v1.0)
 
 - Hotkeys (`F1::` block + single-line), hotstrings, dynamic hotkeys and
   timers (positive recurring, negative one-shot, `0` off).
@@ -96,7 +104,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   uses real MD5/SHA hashing; GDI+/COM are explicit display-only/no-op
   gaps.
 - Files: real `FileOpen` File objects (`Read`/`Write`/`RawRead`/`Seek`/
-  `Pos`), `FileRead`/`FileAppend`, INI read/write/delete.
+  `Pos`), `FileRead`/`FileAppend`, INI read/write/delete, `Loop Files`
+  v2 specials, and Windows case-insensitive path lookup.
 
 ## Hyprland integration
 
@@ -131,9 +140,11 @@ never touches the real Natro tree or live desktop.
 
 ## Docs
 
-- `HANDOFF-v08-startup.md` — current verified startup/soak state and limitations
+- `HANDOFF-v10.md` — current verified v1.0 startup/soak state and limitations
 - `docs/CAPABILITY-MATRIX.md` — v1.0 status for every load-bearing surface
-- `docs/CENSUS-v0.8.md` — current Natro census and known-gap taxonomy
+- `docs/CENSUS-v1.0.md` — current Natro census and known-gap taxonomy
+- `HANDOFF-v08-startup.md` — previous startup/soak handoff
+- `docs/CENSUS-v0.8.md` — previous census baseline
 - `HANDOFF-v07-os.md` — previous OS-bridge handoff
 - `docs/CENSUS-v0.7.md` — previous census baseline
 - `docs/GUI-DECISION.md` — PySide6 measurement and decision
@@ -147,5 +158,8 @@ never touches the real Natro tree or live desktop.
   plus a measured latency/CPU/RSS soak. **Complete.**
 - **v1.0:** capability matrix with no `unknown` rows covering windows,
   clipboard, memory/DllCall, COM/WinHttp, GDI+/vision, timers, IPC and
-  input. **Published** in `docs/CAPABILITY-MATRIX.md`; documented blockers
-  stay visible rather than being stubbed into false success.
+  input, plus the v2 language/OS surface above. **Complete.** Documented
+  blockers stay visible rather than being stubbed into false success.
+- **Post-1.0:** live XWayland/desktop validation, native-Wayland
+  capture/focus, and a native helper for any COM/HTTP path that becomes
+  load-bearing.
