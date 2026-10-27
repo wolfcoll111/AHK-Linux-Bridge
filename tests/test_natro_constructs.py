@@ -358,6 +358,7 @@ def test_onerror_named_callback_sees_error_object():
     text = (
         "OnError(Handler)\n"
         "Handler(e, mode) {\n"
+        "    global handledMode, handledMsg\n"
         "    handledMode := mode\n"
         "    handledMsg := e.Message\n"
         "    return 1\n"

@@ -8,8 +8,8 @@ skip-log), Try/Catch/Finally (control flow never swallowed), x := expr
 (arithmetic, strings, Random(), StrSplit/SubStr/InStr/..., function calls,
 [...] literals, .Length), user functions + Return value, MsgBox, IniRead/
 IniWrite (real), WinActivate/PixelSearch, CoordMode/SendMode/Set* directives
-(logged), #Include (logged), global/static/local (no-ops), labels (skipped),
-`;` comments, continuation-line joining.
+(logged), #Include (logged), global/static/local declarations, labels
+(skipped), `;` comments, continuation-line joining.
 """
 from __future__ import annotations
 import re
@@ -21,7 +21,6 @@ HOTSTRING_RE = re.compile(r'^\s*:([^:]*):([^:]+)::\s*(.*)$')
 FUNCDEF_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
 CLASS_RE = re.compile(r'^\s*class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_]\w*))?\s*\{?\s*$', re.IGNORECASE)
 METHODDEF_RE = re.compile(r'^\s*(?:static\s+|public\s+|private\s+)*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
-STATIC_ASSIGN_RE = re.compile(r'^\s*static\s+([A-Za-z_]\w*\s*:=.+)$', re.IGNORECASE)
 LOOP_RE = re.compile(r'^\s*Loop\s*,?\s*(.+?)\s*(\{\s*)?$', re.IGNORECASE)
 LOOP_BARE_RE = re.compile(r'^\s*Loop\s*,?\s*(\{\s*)?$', re.IGNORECASE)
 LOOPPARSE_RE = re.compile(r'^\s*Loop\s+Parse\s*,?\s*(.*?)\s*(\{\s*)?$', re.IGNORECASE)
@@ -267,6 +266,9 @@ class FuncDef:
     body: list = field(default_factory=list)
     defaults: dict = field(default_factory=dict)
     static: bool = False
+    # Name of the lexically enclosing function, if this is a nested
+    # definition; nested functions are AHK v2 closures.
+    parent: str | None = None
 
 
 @dataclass
@@ -1353,10 +1355,9 @@ def _parse_case_statement(lines: list[str], i: int):
                 body, k, _ = _parse_block(lines, j + 1)
                 return FuncDef(_mname, fn_params, body, fn_defaults,
                                static=bool(re.match(r'(?i)^\s*static\b', code))), k
-    ms = STATIC_ASSIGN_RE.match(code)
-    if ms:
-        st = parse_statement(ms.group(1))
-        return (st if st is not None else Setting("Static", ms.group(1))), i + 1
+    # `static x := ...` is handled by DECL_RE as a ScopeDecl so the runtime
+    # can keep one persistent slot per function (see Runtime._call_func).
+    # Do not rewrite it to a plain assignment here.
     m = LOOPPARSE_RE.match(code)
     if m:
         return _parse_loopparse(lines, i, m)
@@ -1700,30 +1701,38 @@ def parse_logical_lines(lines: list[str], *, source_map: list | None = None,
     return sc
 
 
-def _hoist_nested_functions(sc: Script, nodes: list):
-    """Walk statement bodies and register nested FuncDefs globally."""
+def _hoist_nested_functions(sc: Script, nodes: list, parent: str | None = None):
+    """Walk statement bodies and register nested FuncDefs globally.
+
+    Nested definitions also get their enclosing function recorded so the
+    runtime can model AHK v2 closure captures.
+    """
     seen: set[int] = set()
 
-    def walk(items):
+    def walk(items, owner):
         for node in items or []:
             if id(node) in seen:
                 continue
             seen.add(id(node))
+            child_owner = owner
             if isinstance(node, FuncDef):
+                if owner is not None:
+                    node.parent = owner
                 sc.functions.setdefault(node.name, node)
+                child_owner = node.name
             for attr in ("body", "then_body", "else_body", "try_body",
                          "catch_body", "finally_body"):
                 value = getattr(node, attr, None)
                 if isinstance(value, list):
-                    walk(value)
+                    walk(value, child_owner)
             for attr in ("cases",):
                 for case in getattr(node, attr, []) or []:
                     try:
-                        walk(case[1])
+                        walk(case[1], child_owner)
                     except (TypeError, IndexError):
                         pass
 
-    walk(nodes)
+    walk(nodes, parent)
 
 
 def _collect_class_statics(sc: Script, nodes: list):

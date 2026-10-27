@@ -359,6 +359,7 @@ def test_missing_roblox_window_returns_zero_not_success(monkeypatch):
     rt = run(
         'GetRobloxClientPos()\n'
         '{\n'
+        '    global wx, wy, ww, wh\n'
         '    try\n'
         '        WinGetClientPos &wx, &wy, &ww, &wh, "ahk_id 0"\n'
         '    catch TargetError\n'

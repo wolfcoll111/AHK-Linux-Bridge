@@ -400,6 +400,111 @@ def _resolve_ci_path(path: str) -> str:
     return current or path
 
 
+def _iter_scope_decls(block):
+    """Yield every ``ScopeDecl`` in a statement block, recursively.
+
+    AHK declarations are function-wide regardless of where they appear, so
+    the analysis has to look inside ``if``/``loop``/``try`` bodies too.
+    """
+    for st in block or ():
+        if isinstance(st, P.ScopeDecl):
+            yield st
+        if isinstance(st, P.Switch):
+            for _cond, body in st.cases or ():
+                yield from _iter_scope_decls(body)
+            continue
+        for attr in ("body", "then_body", "else_body", "try_body",
+                     "catch_body", "finally_body"):
+            child = getattr(st, attr, None)
+            if isinstance(child, list):
+                yield from _iter_scope_decls(child)
+
+
+def _iter_assigned_names(block):
+    """Lowercased non-dynamic assignment targets in a function body.
+
+    Nested FuncDefs are skipped: their variables belong to their own scope
+    (or are captures resolved by the runtime), not to this function.
+    """
+    names: set[str] = set()
+    for st in block or ():
+        if isinstance(st, P.FuncDef):
+            continue
+        if isinstance(st, (P.Assign, P.CompoundAssign, P.IncDec)):
+            name = getattr(st, "name", "") or ""
+            if name and "%" not in name:
+                names.add(str(name).lower())
+        elif isinstance(st, P.AssignTarget):
+            m = re.match(r"^\s*&?([A-Za-z_]\w*)", getattr(st, "target", ""))
+            if m:
+                names.add(m.group(1).lower())
+        elif isinstance(st, P.For):
+            for target in st.targets or ():
+                target = str(target).lstrip("&").strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", target):
+                    names.add(target.lower())
+        if isinstance(st, P.ScopeDecl):
+            # Only `local` forces a function-local; global/static are not.
+            if (st.kind or "").lower() == "local":
+                names.update(name.lower() for name in st.names)
+        if isinstance(st, P.Switch):
+            for _cond, body in st.cases or ():
+                names |= _iter_assigned_names(body)
+            continue
+        for attr in ("body", "then_body", "else_body", "try_body",
+                     "catch_body", "finally_body"):
+            child = getattr(st, attr, None)
+            if isinstance(child, list):
+                names |= _iter_assigned_names(child)
+    return names
+
+
+def _func_scope_info(fn):
+    """Lexical scope analysis for one function, cached on the FuncDef.
+
+    Returns ``(globals, local_decls, statics, assume_global, params,
+    locals)`` with names lowercased (AHK variables are case-insensitive).
+    ``statics`` maps a lowercased name to ``(declared_name,
+    initializer_or_None)``; ``locals`` is the set of names this function
+    owns, which nested closures may capture.
+    """
+    info = getattr(fn, "_scope_info", None)
+    if info is not None:
+        return info
+    globals_set: set[str] = set()
+    local_decls: set[str] = set()
+    statics: dict[str, tuple] = {}
+    assume_global = False
+    for decl in _iter_scope_decls(fn.body):
+        kind = (decl.kind or "").lower()
+        if kind == "global":
+            if not decl.names and not decl.initializers:
+                assume_global = True
+            for name in decl.names:
+                globals_set.add(name.lower())
+            for name, _raw in decl.initializers:
+                globals_set.add(name.lower())
+        elif kind == "local":
+            for name in decl.names:
+                local_decls.add(name.lower())
+        elif kind == "static":
+            for name in decl.names:
+                statics.setdefault(name.lower(), (name, None))
+            for name, raw in decl.initializers:
+                statics[name.lower()] = (name, raw)
+    params = frozenset(p.lower() for p in fn.params if p)
+    assigned = _iter_assigned_names(fn.body) - globals_set - set(statics)
+    locals_set = frozenset(assigned | local_decls | params)
+    info = (frozenset(globals_set), frozenset(local_decls), statics,
+            assume_global, params, locals_set)
+    fn._scope_info = info
+    return info
+
+
+# Legacy globals that outlive a function call even without a declaration.
+_PERSISTENT_SCOPE_VARS = frozenset({"foundx", "foundy"})
+
+
 def _has_cmp_op(s: str) -> bool:
     """True when s contains a comparison operator outside string literals
     (`~=`, `<=`, `>=`, `==`, `!=`, or lone `=`/`<`/`>` not part of `:=`)."""
@@ -499,7 +604,50 @@ class Runtime:
         # -- OS bridge (v0.7) --
         self._clipboard_loaded = False
         self._active_gui = None
+        # -- function scope (v1.0) --
+        self._static_scopes: dict[str, dict] = {}
+        self._global_scope_names: set[str] = set()
+        self._call_stack: list[dict] = []
+        self._index_nested_functions()
         self._init_builtin_vars(script_path, args, working_dir, screen_size)
+
+    def _index_nested_functions(self):
+        """Register nested FuncDefs with AHK load-time semantics.
+
+        ``parse_logical_lines`` hoists them for included scripts; direct
+        ``parse_script`` callers still need nested functions callable (and
+        their ``parent`` recorded for closure captures).
+        """
+        seen: set[int] = set()
+
+        def walk(nodes, owner=None):
+            for node in nodes or ():
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                if isinstance(node, P.FuncDef):
+                    if owner is not None and getattr(node, "parent", None) is None:
+                        node.parent = owner
+                    self.script.functions.setdefault(node.name, node)
+                    walk(node.body, node.name)
+                    continue
+                if isinstance(node, P.Class):
+                    walk(node.body, owner)
+                    continue
+                for attr in ("body", "then_body", "else_body", "try_body",
+                             "catch_body", "finally_body"):
+                    child = getattr(node, attr, None)
+                    if isinstance(child, list):
+                        walk(child, owner)
+                for case in getattr(node, "cases", []) or ():
+                    try:
+                        walk(case[1], owner)
+                    except (TypeError, IndexError):
+                        pass
+
+        walk(self.script.auto_section)
+        for fn in list(self.script.functions.values()):
+            walk(fn.body, fn.name)
 
     # -- built-in variables --
     def _init_builtin_vars(self, script_path, args, working_dir, screen_size):
@@ -1495,8 +1643,24 @@ class Runtime:
         elif isinstance(st, P.Return):
             raise _Return(self._eval_expr(st.value) if st.value is not None else None)
         elif isinstance(st, P.ScopeDecl):
-            # Our vars are function-global already; static persists too.
-            # `global Name := value` still has to perform the initialization.
+            kind = (st.kind or "").lower()
+            raw_values = {n.lower(): raw
+                          for n, raw in getattr(st, "initializers", []) or []}
+            if kind == "static":
+                frame = self._call_stack[-1] if self._call_stack else None
+                store = frame["store"] if frame is not None else None
+                for name in st.names:
+                    low = name.lower()
+                    if store is not None and low not in store:
+                        raw = raw_values.get(low)
+                        store[low] = (self._eval_expr(raw) if raw is not None
+                                      else "")
+                    if store is not None and low in store:
+                        self._set_var(name, store[low])
+                    elif low in raw_values:
+                        self._set_var(name, self._eval_expr(raw_values[low]))
+                return
+            # `global Name := value` / `local` initializers must still run.
             for name, raw in getattr(st, "initializers", []) or []:
                 self._set_var(name, self._eval_expr(raw))
         elif isinstance(st, P.Setting):
@@ -1801,33 +1965,118 @@ class Runtime:
         return self._call_func(fn, c.args)
 
     def _call_func(self, fn, raw_args: list):
-        """Run one FuncDef with raw source arguments."""
+        """Run one FuncDef with raw source arguments.
+
+        AHK variables are local to the function unless declared ``global`` or
+        ``static``.  The flat variable table is snapshotted so a local
+        accumulator (HashFile's ``HashVal``) cannot leak into the next call,
+        while declared globals and statics keep their documented persistence.
+        Nested functions are AHK v2 closures: names that their enclosing
+        (active) function owns are shared, not restored.
+        """
+        globals_set, local_decls, statics, assume_global, params, locals_set = \
+            _func_scope_info(fn)
+        self._global_scope_names.update(globals_set)
+        chain = self._function_chain(fn)
+        if any(_func_scope_info(ancestor)[3] for ancestor in chain):
+            # Docs: nested functions of an assume-global function behave as
+            # assume-global too, except for the outer's own locals/statics.
+            assume_global = True
+        captures: set[str] = set()
+        if chain and not getattr(fn, "static", False):
+            ancestor_names = {ancestor.name.lower() for ancestor in chain}
+            ancestor_locals: set[str] = set()
+            for frame in self._call_stack:
+                if frame["name"] in ancestor_names:
+                    ancestor_locals |= frame["locals"]
+            captures = (locals_set - params - local_decls) & ancestor_locals
+        # Arguments are evaluated in the caller's scope; `F(x := 1)` must
+        # assign the caller's x, not a temporary local of F.
+        arg_values = [self._eval_expr(raw) for raw in raw_args]
+        store = self._static_scopes.setdefault(fn.name, {})
+        # Snapshot before statics/params are bound so locals are restored to
+        # their exact pre-call state.
         saved = dict(self.vars)
-        defaults = getattr(fn, "defaults", None) or {}
-        for index, p in enumerate(fn.params):
-            if index < len(raw_args):
-                self.vars[p] = self._eval_expr(raw_args[index])
-            elif p in defaults:
-                default = defaults[p]
-                if str(default).strip().lower() == "unset":
-                    # AHK's `p := unset`: omitted means genuinely unset.
-                    self.vars.pop(p, None)
-                else:
-                    self.vars[p] = self._eval_expr(default)
+        for low, (declared, _raw) in statics.items():
+            if low in store:
+                self._set_var(declared, store[low])
+        self._call_stack.append(
+            {"name": fn.name.lower(), "statics": statics, "store": store,
+             "params": params, "locals": locals_set})
         try:
-            self._exec_block(fn.body)
-            return ""
-        except _Return as r:
-            return r.value if r.value is not None else ""
-        except (_Break, _Continue):
-            return ""
+            defaults = getattr(fn, "defaults", None) or {}
+            for index, p in enumerate(fn.params):
+                if index < len(arg_values):
+                    self.vars[p] = arg_values[index]
+                elif p in defaults:
+                    default = defaults[p]
+                    if str(default).strip().lower() == "unset":
+                        # AHK's `p := unset`: omitted means genuinely unset.
+                        self.vars.pop(p, None)
+                    else:
+                        self.vars[p] = self._eval_expr(default)
+            try:
+                self._exec_block(fn.body)
+                return ""
+            except _Return as r:
+                return r.value if r.value is not None else ""
+            except (_Break, _Continue):
+                return ""
         finally:
-            # keep globals simple: restore only params shadowing
-            for p in fn.params:
-                if p in saved:
-                    self.vars[p] = saved[p]
-                else:
-                    self.vars.pop(p, None)
+            self._call_stack.pop()
+            self._leave_call(saved, local_decls, statics, assume_global,
+                             params, store, captures)
+
+    def _function_chain(self, fn):
+        """Enclosing FuncDefs of a nested function, innermost first."""
+        chain = []
+        seen: set[str] = set()
+        parent = getattr(fn, "parent", None)
+        while parent and parent not in seen:
+            seen.add(parent)
+            ancestor = self.script.functions.get(parent)
+            if ancestor is None:
+                break
+            chain.append(ancestor)
+            parent = getattr(ancestor, "parent", None)
+        return chain
+
+    def _leave_call(self, saved, local_decls, statics, assume_global,
+                    params, store, captures):
+        """Persist statics and restore every non-global local binding."""
+        force_local = set(params) | set(local_decls)
+        for low, (declared, _raw) in statics.items():
+            key = self._var_key(declared)
+            if key is not None:
+                store[low] = self.vars[key]
+            else:
+                store.pop(low, None)
+
+        def keep(low: str) -> bool:
+            if low in force_local:
+                return False
+            if low in captures:
+                return True
+            if low.startswith("a_") or low in _PERSISTENT_SCOPE_VARS:
+                return True
+            if assume_global:
+                return True
+            # Declared globals are function-wide; a name declared global by
+            # any executed function must survive the enclosing call too.
+            return low in self._global_scope_names
+
+        for name, old in saved.items():
+            low = name.lower()
+            if low in statics:
+                self.vars[name] = old
+            elif not keep(low):
+                self.vars[name] = old
+        for name in list(self.vars):
+            if name in saved:
+                continue
+            low = name.lower()
+            if low in statics or not keep(low):
+                del self.vars[name]
 
     def _builtin(self, c: P.FuncCall):
         low = c.name.lower()

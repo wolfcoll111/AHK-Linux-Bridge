@@ -75,8 +75,10 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `unset`), classes with static methods and includes.
 - `x := expr`, arrow functions returning object literals, objects,
   arrays, maps, case-insensitive variables in expressions and
-  concatenation (`A_index` reads `A_Index`), `Fn.Bind(...)` partial
-  application, and `StrSplit` by delimiter or character index.
+  concatenation (`A_index` reads `A_Index`), function-local scope with
+  `global`/`static` declarations and nested-function closures,
+  `Fn.Bind(...)` partial application, and `StrSplit` by delimiter or
+  character index.
 - `MsgBox`, live `PixelSearch` (mss, `FoundX`/`FoundY`), image search,
   screen capture and `WinActivate` (Hyprland match, else logged).
   Continuation sections attached to a `MsgBox` (Natro's multi-line

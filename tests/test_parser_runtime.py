@@ -249,11 +249,12 @@ def test_braceless_if_does_not_steal_enclosing_else():
         "  } else {\n"
         "    y := 2\n"
         "  }\n"
+        "  return y\n"
         "}\n"
         "after() {\n"
         "  return 1\n"
         "}\n"
-        "outer()\n"
+        "result := outer()\n"
     )
     sc, rt, sim = run(text)
     assert "outer" in sc.functions
@@ -263,7 +264,7 @@ def test_braceless_if_does_not_steal_enclosing_else():
     assert inner_loop.body[0].else_body == []      # braceless if has no else
     assert len(outer_if.else_body) == 1            # else belongs to the outer if
     rt.run_auto()
-    assert rt.vars.get("y") == 2
+    assert rt.vars.get("result") == 2
 
 
 def test_implicit_concat_resolves_mixed_case_vars():
