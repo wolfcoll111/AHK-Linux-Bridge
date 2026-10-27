@@ -75,6 +75,19 @@ def test_run_continuation_section_evaluates_concat_expression():
                and '"/bin/echo" hello' in entry for entry in rt.logs)
 
 
+def test_trayseticon_command_style_is_parsed_and_logged():
+    # Natro calls `TraySetIcon "path"` without parentheses; the tray is a
+    # Windows display surface, so parse the statement and log the no-op
+    # instead of leaving it as a raw statement.
+    text = 'TraySetIcon "nm_image_assets\\auryn.ico"\n'
+    sc, rt, _sim = run(text)
+    assert type(sc.auto_section[0]).__name__ == "LegacyCmd"
+    rt.run_auto()
+    assert any("TraySetIcon" in entry and "no system tray" in entry
+               for entry in rt.logs)
+    assert not any(entry.startswith("raw:") for entry in rt.logs)
+
+
 def test_switch_matches():
     sc, rt, sim = run('x := 2\nSwitch x {\nCase 1:\nSend "one"\nCase 2:\nSend "two"\nDefault:\nSend "other"\n}\n')
     rt.run_auto()

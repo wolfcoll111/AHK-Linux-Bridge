@@ -4310,6 +4310,10 @@ class Runtime:
         if low in ("reload", "edit", "listvars", "keyhistory", "exit"):
             self.logs.append(f"{st.name} {rest} (noted, linux no-op)")
             return
+        if low == "trayseticon":
+            self.logs.append(
+                f"TraySetIcon {rest} (no system tray on Linux, ignored)")
+            return
         if low in ("wingetpos", "wingetclientpos", "wingettitle",
                    "winclose", "winkill", "winmove", "winsettransparent",
                    "winwait", "winwaitclose", "winwaitactive",
