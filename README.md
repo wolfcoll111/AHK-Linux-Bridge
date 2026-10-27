@@ -73,8 +73,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `Switch` (including inline `Case 1: stmt`), `Try`/`Catch`/`Finally`,
   `Break`/`Continue`, functions, classes and includes.
 - `x := expr`, arrow functions returning object literals, objects,
-  arrays, maps, case-insensitive variables and `StrSplit` by delimiter or
-  character index.
+  arrays, maps, case-insensitive variables, `Fn.Bind(...)` partial
+  application, and `StrSplit` by delimiter or character index.
 - `MsgBox`, live `PixelSearch` (mss, `FoundX`/`FoundY`), image search,
   screen capture and `WinActivate` (Hyprland match, else logged).
   Continuation sections attached to a `MsgBox` (Natro's multi-line

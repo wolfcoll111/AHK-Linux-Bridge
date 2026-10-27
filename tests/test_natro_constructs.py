@@ -168,6 +168,33 @@ def test_short_circuit_and():
     assert types(sim) == ["yes"]
 
 
+def test_bind_builtin_freezes_args_and_calls_later():
+    # Natro builds `petalQuestDisclaimer := Msgbox.Bind(...)` and calls it
+    # on demand, exactly like a BoundFunc in AHK v2.
+    _sc, rt, _sim = run(
+        'petalQuestDisclaimer := MsgBox.Bind("petal warning")\n'
+        'petalQuestDisclaimer()\n')
+    rt.run_auto()
+    assert "MsgBox: petal warning" in rt.logs
+
+
+def test_bind_user_function_prepends_frozen_args():
+    _sc, rt, sim = run(
+        "Tag(prefix, value) {\n"
+        "    Send prefix value\n"
+        "}\n"
+        'tagged := Tag.Bind("id:")\n'
+        'tagged("seven")\n')
+    rt.run_auto()
+    assert types(sim) == ["id:seven"]
+
+
+def test_bind_quoted_string_is_not_a_function_reference():
+    _sc, rt, _sim = run('f := "MsgBox".Bind("x")\n')
+    rt.run_auto()
+    assert "method .bind() unsupported (logged)" in rt.logs
+
+
 def test_keywait_timeout_sleeps():
     sc, rt, sim = run('KeyWait "LButton", "D T1"\n')
     rt.run_auto()

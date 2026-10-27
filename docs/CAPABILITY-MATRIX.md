@@ -118,6 +118,13 @@ instead of pretending success.
 | `Run`/`RunWait`, `ProcessClose`, `ProcessExist`, `A_Args` | **Implemented with limitation** | `subprocess`, child IPC; `tests/test_process_bridge.py` | Windows `.exe` targets are refused/logged, not run. `allow_processes=False` is used for census/soak. AutoHotkey command translation is for this bridge, not a Windows shell. |
 | PySide6 `Gui`/controls/tabs/events | **Implemented with limitation** | Optional `gui` extra; lazy import; offscreen fallback; Natro 813 controls/9 tabs | GUI look/layout is Qt, not Win32. Some Natro control types/tabs/placeholders are logged (`SecretButton`, `Text`, Blender controls, etc.). |
 
+## Language and expressions
+
+| Capability | Status | Linux implementation / evidence | Limitation |
+|---|---|---|---|
+| `Fn.Bind(args...)` / BoundFunc partial application | **Implemented with limitation** | `_bind_target()` and `BoundFunc` evaluate the bound arguments once, prepend them to every later call, and dispatch through the normal function/builtin path; `test_bind_builtin_freezes_args_and_calls_later`, `test_bind_user_function_prepends_frozen_args` | Function references are name-based rather than real AHK Func objects. A quoted string is not a function reference and still logs `.bind() unsupported`; binding an undefined name defers to the normal explicit `stub builtin` log; nested `Bind` on a BoundFunc is not modelled. |
+| Multi-line continuations with inline comments | **Implemented** | `_join_continuations_mapped()` joins open parens/brackets, trailing operators and leading `.`/`,`/operator lines, stripping each physical line's `;` comment while preserving quoted text; `test_static_map_continuation_with_inline_comments_enumerates` | — |
+
 ## Safety, observability and non-goals
 
 | Capability | Status | Linux implementation / evidence | Limitation |

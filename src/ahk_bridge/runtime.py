@@ -53,6 +53,25 @@ class _Return(Exception):
         self.value = value
 
 
+class BoundFunc:
+    """AHK v2 ``Fn.Bind(args...)`` result: the bound arguments are evaluated
+    once at Bind() time and prepended to every later call."""
+
+    __slots__ = ("runtime", "name", "args")
+
+    def __init__(self, runtime, name: str, args: list):
+        self.runtime = runtime
+        self.name = name
+        self.args = list(args)
+
+    def call(self, raw_args: list):
+        return self.runtime._call_value(
+            P.FuncCall(self.name, self.args + list(raw_args)))
+
+    def __repr__(self):
+        return f"<BoundFunc {self.name}>"
+
+
 class TrayMenu:
     """Minimal ``A_TrayMenu`` object.
 
@@ -1572,19 +1591,52 @@ class Runtime:
             return True, obj.ahk_dispatch(method, raw_args, self)
         if isinstance(obj, TrayMenu):
             return True, obj.dispatch(method, raw_args, self)
+        if method.lower() == "bind":
+            handled, result = self._bind_target(obj, raw_args, base_expr)
+            if handled:
+                return True, result
         return self._collection_method(obj, method, raw_args)
 
-    def _dispatch_object_method(self, obj, method: str, raw_args: list):
+    def _dispatch_object_method(self, obj, method: str, raw_args: list,
+                                base_raw: str = ""):
         """Dispatch one link of a `.A(...).B(...)` chain."""
         if hasattr(obj, "ahk_dispatch"):
             return obj.ahk_dispatch(method, raw_args, self)
         if isinstance(obj, TrayMenu):
             return obj.dispatch(method, raw_args, self)
+        if method.lower() == "bind":
+            handled, result = self._bind_target(obj, raw_args, base_raw)
+            if handled:
+                return result
         handled, result = self._collection_method(obj, method, raw_args)
         if handled:
             return result
         self.logs.append(f"method .{method.lower()}() unsupported (logged)")
         return ""
+
+    def _bind_target(self, obj, raw_args: list, base_raw: str = ""):
+        """Resolve ``Fn.Bind(...)``: a bare function name (or a variable that
+        holds one) becomes a :class:`BoundFunc`.
+
+        A bare identifier evaluates to the numeric fallback when it is not a
+        variable, so the raw base expression is the function reference.
+        Quoted string values are not function references in AHK and are left
+        unhandled, still logging as an unsupported method.
+        """
+        if isinstance(obj, BoundFunc):
+            return False, ""
+        raw = str(base_raw or "").strip()
+        if self._is_whole_quoted(raw):
+            return False, ""
+        name = None
+        if isinstance(obj, str) and re.fullmatch(r"[A-Za-z_]\w*", obj.strip()):
+            name = obj.strip()
+        elif re.fullmatch(r"[A-Za-z_]\w*", raw):
+            name = raw
+        if not name:
+            return False, ""
+        return True, BoundFunc(self, name,
+                               [self._eval_expr(a) for a in raw_args])
 
     def _collection_method(self, obj, method: str, raw_args: list):
         """AHK v2 Map/Array methods used by the corpus."""
@@ -1688,6 +1740,9 @@ class Runtime:
                 return result
         fn = self.script.functions.get(c.name)
         if fn is None:
+            key = self._var_key(c.name)
+            if key is not None and isinstance(self.vars.get(key), BoundFunc):
+                return self.vars[key].call(c.args)
             return self._builtin(c)
         saved = dict(self.vars)
         for p, a in zip(fn.params, c.args):
@@ -4849,7 +4904,7 @@ class Runtime:
                 raw = [p.strip() for p in _ss_chain(argstr)] if argstr.strip() else []
                 if not P._keep_empty_args(meth):
                     raw = [p for p in raw if p != ""]
-                obj = self._dispatch_object_method(obj, meth, raw)
+                obj = self._dispatch_object_method(obj, meth, raw, base)
             return obj
         # function / method call inside expressions (raw args: quotes kept)
         m = re.match(r"^([A-Za-z_]\w*)\s*\((.*)\)$", s, re.DOTALL)
@@ -4871,6 +4926,10 @@ class Runtime:
                 return obj.ahk_dispatch(meth, _raw, self)
             if isinstance(obj, TrayMenu):
                 return obj.dispatch(meth, _raw, self)
+            if meth.lower() == "bind":
+                handled, result = self._bind_target(obj, _raw, m.group(1))
+                if handled:
+                    return result
             handled, result = self._collection_method(obj, meth.lower(), _raw)
             if handled:
                 return result
