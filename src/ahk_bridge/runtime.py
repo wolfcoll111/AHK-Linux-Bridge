@@ -29,6 +29,25 @@ ABORT_KEYS = ("Escape", "Ctrl+Alt+C")
 # resolved through the array's Default property when read.
 _VALUELESS = object()
 
+# Distinguishes "Map.Default was never assigned" from an assigned blank value.
+_MISSING = object()
+
+
+class AhkMap(dict):
+    """AHK v2 Map object.
+
+    Plain dicts also model object literals, so property assignment on those
+    stays a data key.  This subclass keeps Map's Default/CaseSense properties
+    out of the key space while still passing ``isinstance(x, dict)``.
+    """
+
+    __slots__ = ("default", "case_sense")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default = _MISSING
+        self.case_sense = True
+
 
 class TargetError(RuntimeError):
     """AHK `TargetError`: a window/control required by a call was not found."""
@@ -1875,30 +1894,42 @@ class Runtime:
         if isinstance(obj, dict):
             if m == "has":
                 try:
-                    return True, 1 if val(0) in obj else 0
+                    return True, 1 if self._map_key(obj, val(0)) in obj else 0
                 except TypeError:
                     return True, 0
             if m in ("delete", "remove"):
                 try:
-                    existed = val(0) in obj
+                    key = self._map_key(obj, val(0))
+                    existed = key in obj
                     if existed:
-                        del obj[val(0)]
+                        del obj[key]
                     return True, 1 if existed else 0
                 except (TypeError, KeyError):
                     return True, 0
             if m == "clone":
+                if isinstance(obj, AhkMap):
+                    copy = AhkMap(obj)
+                    copy.default = obj.default
+                    copy.case_sense = obj.case_sense
+                    return True, copy
                 return True, dict(obj)
             if m == "clear":
                 obj.clear()
                 return True, ""
             if m == "get":
-                key = val(0)
+                key = self._map_key(obj, val(0))
                 try:
-                    return True, obj[key] if key in obj else val(1, "")
+                    if key in obj:
+                        return True, obj[key]
                 except TypeError:
-                    return True, val(1, "")
+                    pass
+                if len(raw_args) > 1:
+                    return True, val(1)
+                if isinstance(obj, AhkMap) and obj.default is not _MISSING:
+                    return True, obj.default
+                return True, ""
             if m == "set":
-                obj[val(0)] = val(1)
+                obj[self._map_key(obj, val(0))] = val(1)
                 return True, obj
             if m in ("count", "length"):
                 return True, len(obj)
@@ -3647,7 +3678,8 @@ class Runtime:
                 return [ev(a) for a in args]
             if low == "map" :
                 vals = [ev(a) for a in args]
-                return {vals[k]: vals[k + 1] for k in range(0, len(vals) - 1, 2)}
+                return AhkMap(
+                    (vals[k], vals[k + 1]) for k in range(0, len(vals) - 1, 2))
             if low == "isobject" and args:
                 return isinstance(ev(args[0]), (list, dict))
             if low == "isset" and args:
@@ -4537,7 +4569,12 @@ class Runtime:
         if isinstance(obj, str):
             return obj[int(key) - 1]
         if isinstance(obj, dict):
-            return obj[key] if key in obj else obj[str(key)]
+            lookup = self._map_key(obj, key)
+            if lookup in obj:
+                return obj[lookup]
+            if isinstance(obj, AhkMap) and obj.default is not _MISSING:
+                return obj.default
+            return obj[str(key)]
         if isinstance(obj, TrayMenu):
             return getattr(obj, str(key).lower(), "")
         self._log_once(f"indexing {type(obj).__name__} not modeled (logged)")
@@ -4548,6 +4585,27 @@ class Runtime:
         if entry is not None and entry[0] is obj:
             return entry[1]
         return ""
+
+    @staticmethod
+    def _case_sense_flag(value) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in ("off", "0", "false")
+        return bool(value)
+
+    def _map_key(self, obj, key):
+        """Canonical stored key for a Map lookup (CaseSense Off is folded)."""
+        try:
+            if key in obj:
+                return key
+        except TypeError:
+            return key
+        if (isinstance(obj, AhkMap) and not obj.case_sense
+                and isinstance(key, str)):
+            low = key.lower()
+            for existing in obj:
+                if isinstance(existing, str) and existing.lower() == low:
+                    return existing
+        return key
 
     def _store(self, obj, kind, key, val):
         if kind == "key" and hasattr(obj, "ahk_set_property"):
@@ -4582,7 +4640,27 @@ class Runtime:
                 self._array_defaults[id(obj)] = (obj, val)
                 return
             raise TypeError(f"cannot store array property {key}")
+        if isinstance(obj, AhkMap) and kind == "key":
+            prop = str(key).lower()
+            if prop == "default":
+                obj.default = val
+                return
+            if prop == "casesense":
+                if obj:
+                    self._log_once(
+                        "Map.CaseSense on a non-empty Map ignored (logged)")
+                    return
+                obj.case_sense = self._case_sense_flag(val)
+                return
+            if prop == "capacity":
+                # Capacity is an allocation hint; it never changes pairs.
+                return
+            if prop == "count":
+                raise TypeError("Map.Count is read-only")
+            # Other names keep the historical object-property-as-pair model.
         if isinstance(obj, dict):
+            if isinstance(obj, AhkMap):
+                key = self._map_key(obj, key)
             obj[key] = val
             return
         if isinstance(obj, TrayMenu) and kind == "key":
@@ -5317,6 +5395,13 @@ class Runtime:
             prop = m.group(2).lower()
             if prop == "length" and isinstance(obj, (list, str, dict)):
                 return len(obj)
+            if isinstance(obj, AhkMap):
+                if prop in ("count", "capacity"):
+                    return len(obj)
+                if prop == "casesense":
+                    return "On" if obj.case_sense else "Off"
+                if prop == "default" and obj.default is not _MISSING:
+                    return obj.default
             if isinstance(obj, dict):
                 return obj.get(m.group(2), obj.get(prop, ""))
             if hasattr(obj, "ahk_get_property"):

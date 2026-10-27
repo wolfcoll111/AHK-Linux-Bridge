@@ -593,6 +593,76 @@ def test_mondo_action_list_array_properties_apply_in_build_statement():
     assert not any("assign-target" in line for line in rt.logs)
 
 
+def test_map_default_and_count_properties_stay_out_of_key_space():
+    # Natro's digit readers do `(digits := Map()).Default := ""` and then
+    # branch on digits.Count; neither the Default nor Count property may
+    # become a map key.
+    _sc, rt, _sim = run(
+        "m := Map()\n"
+        'm.Default := ""\n'
+        "c0 := m.Count\n"
+        'm[1] := "a"\n'
+        "c1 := m.Count\n"
+        "blank := m[2]\n"
+        'm.Default := 0\n'
+        "zero := m[9]\n"
+        "missing := m.Get(7)\n"
+        'defined := m.Get(7, "fallback")\n'
+    )
+    rt.run_auto()
+    assert rt.vars["c0"] == 0
+    assert rt.vars["c1"] == 1
+    assert rt.vars["blank"] == ""
+    assert rt.vars["zero"] == 0
+    assert rt.vars["missing"] == 0
+    assert rt.vars["defined"] == "fallback"
+
+
+def test_map_casesense_off_resolves_string_keys_case_insensitively():
+    _sc, rt, _sim = run(
+        "m := Map(), m.CaseSense := 0\n"
+        'm["Boost"] := 1\n'
+        'found := m["boost"]\n'
+        'has := m.Has("BOOST")\n'
+        'm["BOOST"] := 2\n'
+        "n := m.Count\n"
+        "cs := m.CaseSense\n"
+        'entry := ""\n'
+        "for k, v in m\n"
+        "    entry .= k v\n"
+        'g := m.Get("bOoSt")\n'
+        "f := Map()\n"
+        "f.CaseSense := false\n"
+        'f["X"] := 1\n'
+        'fx := f["x"]\n'
+    )
+    rt.run_auto()
+    assert rt.vars["found"] == 1
+    assert rt.vars["has"] == 1
+    assert rt.vars["n"] == 1
+    assert rt.vars["cs"] == "Off"
+    assert rt.vars["entry"] == "Boost2"
+    assert rt.vars["g"] == 2
+    assert rt.vars["fx"] == 1
+
+
+def test_map_clone_preserves_default_and_casesense():
+    _sc, rt, _sim = run(
+        "src := Map()\n"
+        "src.CaseSense := 0\n"
+        'src.Default := "?"\n'
+        'src["Key"] := 1\n'
+        "copy := src.Clone()\n"
+        'got := copy["key"]\n'
+        'miss := copy["nope"]\n'
+        "n := copy.Count\n"
+    )
+    rt.run_auto()
+    assert rt.vars["got"] == 1
+    assert rt.vars["miss"] == "?"
+    assert rt.vars["n"] == 1
+
+
 def test_static_map_continuation_with_inline_comments_enumerates():
     # Natro's path_names table spans physical lines and carries `;` comments
     # after some entries.  Comments must be dropped per physical line while
