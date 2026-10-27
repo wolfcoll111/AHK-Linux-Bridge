@@ -227,6 +227,45 @@ def test_unset_default_keeps_param_unset():
     assert types(sim) == ["0", "1"]
 
 
+def test_class_brace_on_same_line_and_static_dispatch():
+    _sc, rt, sim = run(
+        "class MathKit {\n"
+        "    static Double(n) {\n"
+        "        return n * 2\n"
+        "    }\n"
+        "}\n"
+        "result := MathKit.Double(21)\n"
+        "Send result\n")
+    rt.run_auto()
+    assert any(line.startswith("class MathKit") for line in rt.logs)
+    assert types(sim) == ["42"]
+
+
+def test_instance_method_is_not_dispatched_as_static():
+    _sc, rt, _sim = run(
+        "class Kit {\n"
+        "    Thing() {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "x := Kit.Thing()\n")
+    rt.run_auto()
+    assert "method .thing() unsupported (logged)" in rt.logs
+
+
+def test_dynamic_dispatch_name_resolves_var_case_insensitively():
+    # Another function may have created the key with different casing; the
+    # `%c%` substitution must still find it (AHK variables are case-blind).
+    _sc, rt, sim = run(
+        "C := 2\n"
+        "nm_Tab%c%()\n"
+        "nm_Tab2() {\n"
+        '    Send "dynamic"\n'
+        "}\n")
+    rt.run_auto()
+    assert types(sim) == ["dynamic"]
+
+
 def test_keywait_timeout_sleeps():
     sc, rt, sim = run('KeyWait "LButton", "D T1"\n')
     rt.run_auto()

@@ -1591,6 +1591,9 @@ class Runtime:
             return True, obj.ahk_dispatch(method, raw_args, self)
         if isinstance(obj, TrayMenu):
             return True, obj.dispatch(method, raw_args, self)
+        handled, result = self._class_static_call(base_expr, method, raw_args)
+        if handled:
+            return True, result
         if method.lower() == "bind":
             handled, result = self._bind_target(obj, raw_args, base_expr)
             if handled:
@@ -1604,6 +1607,9 @@ class Runtime:
             return obj.ahk_dispatch(method, raw_args, self)
         if isinstance(obj, TrayMenu):
             return obj.dispatch(method, raw_args, self)
+        handled, result = self._class_static_call(base_raw, method, raw_args)
+        if handled:
+            return result
         if method.lower() == "bind":
             handled, result = self._bind_target(obj, raw_args, base_raw)
             if handled:
@@ -1613,6 +1619,16 @@ class Runtime:
             return result
         self.logs.append(f"method .{method.lower()}() unsupported (logged)")
         return ""
+
+    def _class_static_call(self, base_raw, method: str, raw_args: list):
+        """`Class.Method(...)` for a static method declared in that class."""
+        name = str(base_raw or "").strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            return False, ""
+        fn = self.script.class_statics.get((name.lower(), method.lower()))
+        if fn is None:
+            return False, ""
+        return True, self._call_func(fn, raw_args)
 
     def _bind_target(self, obj, raw_args: list, base_raw: str = ""):
         """Resolve ``Fn.Bind(...)``: a bare function name (or a variable that
@@ -1728,7 +1744,7 @@ class Runtime:
                 dm = re.search(r"%([A-Za-z_]\w*)%", name)
                 if not dm:
                     break
-                name = name[:dm.start()] + str(self.vars.get(dm.group(1), "")) + name[dm.end():]
+                name = name[:dm.start()] + str(self._get_var(dm.group(1))) + name[dm.end():]
             if name != c.name:
                 c = P.FuncCall(name, c.args)
         if c.name == "__raw__":
@@ -1744,11 +1760,15 @@ class Runtime:
             if key is not None and isinstance(self.vars.get(key), BoundFunc):
                 return self.vars[key].call(c.args)
             return self._builtin(c)
+        return self._call_func(fn, c.args)
+
+    def _call_func(self, fn, raw_args: list):
+        """Run one FuncDef with raw source arguments."""
         saved = dict(self.vars)
         defaults = getattr(fn, "defaults", None) or {}
         for index, p in enumerate(fn.params):
-            if index < len(c.args):
-                self.vars[p] = self._eval_expr(c.args[index])
+            if index < len(raw_args):
+                self.vars[p] = self._eval_expr(raw_args[index])
             elif p in defaults:
                 default = defaults[p]
                 if str(default).strip().lower() == "unset":
@@ -3902,7 +3922,7 @@ class Runtime:
             dm = re.search(r"%([A-Za-z_]\w*)%", h)
             if not dm:
                 break
-            h = h[:dm.start()] + str(self.vars.get(dm.group(1), "")) + h[dm.end():]
+            h = h[:dm.start()] + str(self._get_var(dm.group(1))) + h[dm.end():]
         parts = self._split_juxta(h)
         if not parts:
             return ""
@@ -4935,6 +4955,9 @@ class Runtime:
                 return obj.ahk_dispatch(meth, _raw, self)
             if isinstance(obj, TrayMenu):
                 return obj.dispatch(meth, _raw, self)
+            handled, result = self._class_static_call(m.group(1), meth, _raw)
+            if handled:
+                return result
             if meth.lower() == "bind":
                 handled, result = self._bind_target(obj, _raw, m.group(1))
                 if handled:

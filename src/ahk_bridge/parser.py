@@ -19,7 +19,7 @@ from typing import Any
 HOTKEY_RE = re.compile(r'^\s*([A-Za-z0-9_^!+#<>*~$ ]+?)::\s*(.*)$')
 HOTSTRING_RE = re.compile(r'^\s*:([^:]*):([^:]+)::\s*(.*)$')
 FUNCDEF_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
-CLASS_RE = re.compile(r'^\s*class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_]\w*))?\s*$', re.IGNORECASE)
+CLASS_RE = re.compile(r'^\s*class\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_]\w*))?\s*\{?\s*$', re.IGNORECASE)
 METHODDEF_RE = re.compile(r'^\s*(?:static\s+|public\s+|private\s+)*([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{\s*$')
 STATIC_ASSIGN_RE = re.compile(r'^\s*static\s+([A-Za-z_]\w*\s*:=.+)$', re.IGNORECASE)
 LOOP_RE = re.compile(r'^\s*Loop\s*,?\s*(.+?)\s*(\{\s*)?$', re.IGNORECASE)
@@ -266,6 +266,7 @@ class FuncDef:
     params: list
     body: list = field(default_factory=list)
     defaults: dict = field(default_factory=dict)
+    static: bool = False
 
 
 @dataclass
@@ -304,6 +305,7 @@ class Script:
     hotkeys: list = field(default_factory=list)
     hotstrings: list = field(default_factory=list)
     functions: dict = field(default_factory=dict)
+    class_statics: dict = field(default_factory=dict)
 
 
 def _unquote(s: str) -> str:
@@ -1335,7 +1337,8 @@ def _parse_case_statement(lines: list[str], i: int):
     if mm and mm.group(1).lower() not in _KEYWORDS:
         clean, defaults = _parse_param_list(mm.group(2))
         body, i, _ = _parse_block(lines, i + 1)
-        return FuncDef(mm.group(1), clean, body, defaults), i
+        return FuncDef(mm.group(1), clean, body, defaults,
+                       static=bool(re.match(r'(?i)^\s*static\b', code))), i
     # Allman method form: `Name(args)` / `static Name(args)` + `{` next line.
     _mcode = re.sub(r'^(?:static|public|private)\s+', '', code, flags=re.IGNORECASE)
     _mmc = _match_call(_mcode)
@@ -1348,7 +1351,8 @@ def _parse_case_statement(lines: list[str], i: int):
             if j < len(lines) and lines[j].strip() == "{":
                 fn_params, fn_defaults = _parse_param_list(_mmc[1])
                 body, k, _ = _parse_block(lines, j + 1)
-                return FuncDef(_mname, fn_params, body, fn_defaults), k
+                return FuncDef(_mname, fn_params, body, fn_defaults,
+                               static=bool(re.match(r'(?i)^\s*static\b', code))), k
     ms = STATIC_ASSIGN_RE.match(code)
     if ms:
         st = parse_statement(ms.group(1))
@@ -1680,6 +1684,9 @@ def parse_logical_lines(lines: list[str], *, source_map: list | None = None,
         _hoist_nested_functions(sc, sc.auto_section)
         for fn in list(sc.functions.values()):
             _hoist_nested_functions(sc, fn.body)
+        _collect_class_statics(sc, sc.auto_section)
+        for fn in list(sc.functions.values()):
+            _collect_class_statics(sc, fn.body)
     return sc
 
 
@@ -1705,6 +1712,35 @@ def _hoist_nested_functions(sc: Script, nodes: list):
                         walk(case[1])
                     except (TypeError, IndexError):
                         pass
+
+    walk(nodes)
+
+
+def _collect_class_statics(sc: Script, nodes: list):
+    """Map (class, method) -> static FuncDef so `Class.Method()` dispatches
+    to that exact definition even when another class uses the same name."""
+    seen: set[int] = set()
+
+    def walk(items):
+        for node in items or []:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, Class):
+                for item in node.body or []:
+                    if isinstance(item, FuncDef) and item.static:
+                        sc.class_statics[(node.name.lower(),
+                                          item.name.lower())] = item
+            for attr in ("body", "then_body", "else_body", "try_body",
+                         "catch_body", "finally_body"):
+                value = getattr(node, attr, None)
+                if isinstance(value, list):
+                    walk(value)
+            for case in getattr(node, "cases", []) or []:
+                try:
+                    walk(case[1])
+                except (TypeError, IndexError):
+                    pass
 
     walk(nodes)
 
@@ -1788,6 +1824,9 @@ def _parse_lines(lines: list[str], source_map: list | None = None) -> Script:
             if not auto_done:
                 sc.auto_section.append(st)
         i += 1
+    _collect_class_statics(sc, sc.auto_section)
+    for _fn in list(sc.functions.values()):
+        _collect_class_statics(sc, _fn.body)
     return sc
 
 

@@ -72,7 +72,7 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
 - `Loop N-or-var {}` / `Loop {}`, `While`, `If`/`Else If`/`Else`, `For`,
   `Switch` (including inline `Case 1: stmt`), `Try`/`Catch`/`Finally`,
   `Break`/`Continue`, functions with parameter defaults (including
-  `unset`), classes and includes.
+  `unset`), classes with static methods and includes.
 - `x := expr`, arrow functions returning object literals, objects,
   arrays, maps, case-insensitive variables, `Fn.Bind(...)` partial
   application, and `StrSplit` by delimiter or character index.
