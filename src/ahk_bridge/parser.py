@@ -1904,6 +1904,33 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
             k += 1
         return "".join(res), q
 
+    def _strip_text_comment(ln: str, q0=None) -> tuple:
+        # like _strip_code, but keeps code AND quoted text; only the `;`
+        # comment tail is dropped. Joined continuations must not carry a
+        # comment into the middle of the logical line, where _strip_comment
+        # would truncate the whole statement at the first `;`.
+        res, q = [], q0
+        k = 0
+        while k < len(ln):
+            ch = ln[k]
+            if ch == "`" and k + 1 < len(ln):
+                res.append(ln[k:k + 2])
+                k += 2
+                continue
+            if q:
+                res.append(ch)
+                if ch == q:
+                    q = None
+            elif ch in ('"', "'"):
+                q = ch
+                res.append(ch)
+            elif ch == ";" and (k == 0 or ln[k - 1] in (" ", "\t")):
+                break
+            else:
+                res.append(ch)
+            k += 1
+        return "".join(res).rstrip(), q
+
     cont_q = None
     in_block_comment = False
     physical = text.splitlines()
@@ -1932,7 +1959,9 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
             continue
         # Quote state carries across ALL lines: multi-line strings are legal
         # (continuation sections), and balanced lines are unaffected by carry.
+        q_before = cont_q
         code, cont_q = _strip_code(s, cont_q)
+        text, _ = _strip_text_comment(s, q_before)
         # A line ending in an unclosed quote followed by a continuation-section
         # opener (`(`) starts a multi-line string.  Join the whole section into
         # one logical line so literal text inside it (MCode hex, MsgBox prose)
@@ -1942,7 +1971,7 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
             while j < len(physical) and not physical[j].strip():
                 j += 1
             if j < len(physical) and physical[j].lstrip().startswith("("):
-                buf = s
+                buf = text
                 buf_start = lineno
                 paren = code.count("(") - code.count(")")
                 brack = code.count("[") - code.count("]")
@@ -1950,9 +1979,9 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
         if buf:
             # continuing previous logical line
             if s.startswith((")", "]")):
-                buf += " " + s
+                buf += " " + text
             else:
-                buf += " " + s
+                buf += " " + text
             paren += code.count("(") - code.count(")")
             brack += code.count("[") - code.count("]")
             if (paren <= 0 and brack <= 0 and not _open_ends(buf)
@@ -1975,7 +2004,7 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
             if lead in (",", "."):
                 # A statement can never START with `,`/`.` in AHK — always
                 # an argument-list / string-concat continuation.
-                combined = out[-1] + " " + s
+                combined = out[-1] + " " + text
                 out[-1] = combined
                 paren = code.count("(") - code.count(")")
                 brack = code.count("[") - code.count("]")
@@ -1988,7 +2017,7 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                 # Leading-operator continuation (`&&`/`||`/`AND`/`OR`
                 # first): same rule.  Gdip_ImageSearch writes a multi-line
                 # `If ...` with `OR !(...)` on its own lines.
-                combined = out[-1] + " " + s
+                combined = out[-1] + " " + text
                 out[-1] = combined
                 paren = code.count("(") - code.count(")")
                 brack = code.count("[") - code.count("]")
@@ -1997,7 +2026,7 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                     buf_start = starts.pop()
                 continue
             if lead in ("(", "[") and _prev_open(out[-1]):
-                combined = out[-1] + " " + s
+                combined = out[-1] + " " + text
                 out[-1] = combined
                 paren = code.count("(") - code.count(")")
                 brack = code.count("[") - code.count("]")
@@ -2006,7 +2035,7 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                     buf_start = starts.pop()
                 continue
             if lead == ":" and _colon_continues(out[-1], ln):
-                combined = out[-1] + " " + s
+                combined = out[-1] + " " + text
                 out[-1] = combined
                 paren = code.count("(") - code.count(")")
                 brack = code.count("[") - code.count("]")
@@ -2014,8 +2043,8 @@ def _join_continuations_mapped(text: str) -> tuple[list[str], list[int]]:
                     buf = out.pop()
                     buf_start = starts.pop()
                 continue
-        if paren > 0 or brack > 0 or _open_ends(s):
-            buf = s
+        if paren > 0 or brack > 0 or _open_ends(text):
+            buf = text
             buf_start = lineno
             continue
         out.append(ln)

@@ -374,6 +374,23 @@ def test_map_and_array_methods_and_for_pairs():
     assert types(sim) == ["1", "0", "2", "1", "0", "3", "3", "9", "1", "b", "2"]
 
 
+def test_static_map_continuation_with_inline_comments_enumerates():
+    # Natro's path_names table spans physical lines and carries `;` comments
+    # after some entries.  Comments must be dropped per physical line while
+    # joining; otherwise the first `;` truncates the whole Map() initializer.
+    _sc, rt, sim = run(
+        "static path_names := Map(\n"
+        '    "gtb", ["blue", "mountain"], ; go to (field) booster\n'
+        '    "br", ["red"], ; other\n'
+        ")\n"
+        "for k, v in path_names {\n"
+        "    Send k\n"
+        "    Send v[1]\n"
+        "}\n")
+    rt.run_auto()
+    assert types(sim) == ["gtb", "blue", "br", "red"]
+
+
 def test_noarg_oserror_throws_named_error():
     sc, rt, sim = run("Throw OSError()\n")
     with pytest.raises(RuntimeError, match="OSError"):
