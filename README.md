@@ -81,6 +81,7 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   relative positioning; lazy PySide6 with headless fallback.
 - OS bridge: clipboard, `WinExist`/`WinGetPos`/`WinGetClientPos`/
   `WinGetTitle`, `WinClose`/`WinKill`/`WinMove`/`WinSetTransparent`,
+  `WinWait`/`WinWaitClose`/`WinWaitActive`/`WinWaitNotActive`/`WinActive`,
   `ControlGet*`, PIDs/process names, `TargetError` on missing targets.
 - Memory/DllCall: bounded `Buffer`, `NumGet`/`NumPut`, string helpers,
   and a documented whitelist for timing, process identity, system

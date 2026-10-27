@@ -41,7 +41,7 @@ TRY_RE = re.compile(r'^\s*Try\s*(\{\s*)?$', re.IGNORECASE)
 CATCH_RE = re.compile(r'^\s*(?:\}\s*)?Catch(?:\s+(?:as\s+)?(\w+))?\s*(\{\s*)?$', re.IGNORECASE)
 FINALLY_RE = re.compile(r'^\s*(?:\}\s*)?Finally\s*(\{\s*)?$', re.IGNORECASE)
 LABEL_RE = re.compile(r'^\s*([A-Za-z_]\w*)\s*:\s*$')
-LEGACY_CMD_RE = re.compile(r'^\s*(PostMessage|SendMessage|Run|RunWait|WinShow|WinHide|WinMinimize|WinMaximize|WinRestore|WinClose|WinKill|WinMove|ProcessClose|FileDelete|FileAppend|FileRead|FileCopy|FileMove|FileCreateShortcut|DirCreate|DirDelete|RegRead|RegWrite|RegDelete|ToolTip|TrayTip|SoundBeep|SoundPlay|ClipWait|Reload|Pause|Suspend|Edit|ListVars|KeyHistory|DetectHiddenText|SetCapsLockState|SetNumLockState|SetScrollLockState|BlockInput|Shutdown|Exit|Gosub|Goto|Sleep|Hotkey|Hotstring|SetTimer|SplitPath|SysGet|DriveGet|FileGetTime|FileGetSize|FileSetTime|IniDelete|MouseGetPos|MouseClickDrag|WinGetPos|WinGetTitle|WinGetText|WinGetClientPos|WinSetTransparent|MonitorGetWorkArea|ControlGetPos|ControlGetText|PixelGetColor)\b\s*,?\s*(.*)$', re.IGNORECASE)
+LEGACY_CMD_RE = re.compile(r'^\s*(PostMessage|SendMessage|Run|RunWait|WinShow|WinHide|WinMinimize|WinMaximize|WinRestore|WinClose|WinKill|WinMove|ProcessClose|FileDelete|FileAppend|FileRead|FileCopy|FileMove|FileCreateShortcut|DirCreate|DirDelete|RegRead|RegWrite|RegDelete|ToolTip|TrayTip|SoundBeep|SoundPlay|ClipWait|Reload|Pause|Suspend|Edit|ListVars|KeyHistory|DetectHiddenText|SetCapsLockState|SetNumLockState|SetScrollLockState|BlockInput|Shutdown|Exit|Gosub|Goto|Sleep|Hotkey|Hotstring|SetTimer|SplitPath|SysGet|DriveGet|FileGetTime|FileGetSize|FileSetTime|IniDelete|MouseGetPos|MouseClickDrag|WinGetPos|WinGetTitle|WinGetText|WinGetClientPos|WinSetTransparent|WinWait|WinWaitClose|WinWaitActive|WinWaitNotActive|WinActive|MonitorGetWorkArea|ControlGetPos|ControlGetText|PixelGetColor)\b\s*,?\s*(.*)$', re.IGNORECASE)
 SETTING_RE = re.compile(r'^\s*(CoordMode|SendMode|SetWorkingDir|DetectHiddenWindows|SetTitleMatchMode|SetKeyDelay|SetMouseDelay|SetBatchLines|SetDefaultMouseSpeed|SetControlDelay|SetWinDelay|ListLines|ProcessSetPriority|Thread|Critical|KeyHistory|#Warn|#MaxThreads|#SingleInstance|#Requires|#HotIf|#NoTrayIcon|#NoEnv|#Persistent|#UseHook|#InstallKeybdHook|#InstallMouseHook|#MenuMaskKey|#Hotstring|#InputLevel)\b\s*(.*)$', re.IGNORECASE)
 INCLUDE_RE = re.compile(r'^\s*#Include(?:Again)?\s+(.*)$', re.IGNORECASE)
 DECL_RE = re.compile(r'^\s*(global|static|local)\b\s*(.*)$', re.IGNORECASE)
@@ -450,6 +450,9 @@ _EMPTY_ARG_METHODS = {
     "add", "move", "getpos", "opt", "setfont", "show", "onevent", "usetab",
     # Positional output slots: WinGetPos(&x, &y, , , win) keeps its holes.
     "wingetpos", "wingetclientpos", "controlgetpos",
+    # WinWait(WinTitle, WinText, Timeout, ...) — the middle slot is optional.
+    "winwait", "winwaitclose", "winwaitactive", "winwaitnotactive",
+    "winactive",
 }
 
 

@@ -410,6 +410,9 @@ class Runtime:
         self.vars: dict = {}
         self.logs: list[str] = []
         self._abort = threading.Event()
+        # Monotonic clock used by WinWait* polling; tests replace this with a
+        # virtual clock so no wall-clock waiting is needed.
+        self._clock = time.monotonic
         self.abort_keys = tuple(abort_keys)
         self.max_loop = max_loop  # safety cap for infinite loops in tests
         self.jitter = jitter  # 0.0..1.0 fraction of Sleep randomization
@@ -1818,6 +1821,11 @@ class Runtime:
             return self._win_get_count(c.args)
         if low == "wingetlist":
             return self._win_get_list(c.args)
+        if low in ("winwait", "winwaitclose", "winwaitactive",
+                   "winwaitnotactive"):
+            return self._win_wait(low, c.args)
+        if low == "winactive":
+            return self._win_active(c.args)
         if low in ("winclose", "winkill"):
             return self._win_close(c.args, kill=(low == "winkill"))
         if low == "winmove":
@@ -2421,6 +2429,121 @@ class Runtime:
             return False
         return True
 
+    # -- window waiting (v0.9) --------------------------------------------
+    def _active_window_hwnd(self) -> int:
+        """The active own-Gui handle, else the X11/XWayland active window."""
+        active = getattr(self, "_active_gui", None)
+        if (active is not None and not getattr(active, "destroyed", False)
+                and getattr(active, "visible", True)):
+            return int(getattr(active, "hwnd", 0) or 0)
+        from . import window_ops
+        return int(window_ops.active() or 0)
+
+    def _wait_args(self, args):
+        """Evaluate WinWait*-style arguments, keeping omitted slots.
+
+        Returns (title_raw, win_text, timeout_seconds_or_None, excl_title,
+        excl_text).  A blank Timeout means wait forever, 0 means check once.
+        """
+        title_raw = str(args[0]).strip() if len(args) > 0 else ""
+        win_text = str(self._window_arg(args[1], "")
+                       if len(args) > 1 else "").strip()
+        timeout_raw = args[2] if len(args) > 2 else ""
+        excl_title = str(self._window_arg(args[3], "")
+                         if len(args) > 3 else "").strip().strip('"')
+        excl_text = str(self._window_arg(args[4], "")
+                        if len(args) > 4 else "").strip()
+        timeout = None
+        if str(timeout_raw or "").strip():
+            try:
+                timeout = max(0.0, float(self._window_arg(timeout_raw, 0)))
+            except (TypeError, ValueError):
+                timeout = 0.0
+        return title_raw, win_text, timeout, excl_title, excl_text
+
+    def _wait_text_unsupported(self, win_text, excl_text) -> bool:
+        if str(win_text or "").strip() or str(excl_text or "").strip():
+            self._log_once(
+                "WinWait*: WinText/ExcludeText need foreign control text; "
+                "not available on Linux (no match, never a fake success)")
+            return True
+        return False
+
+    def _wait_target(self, title_raw, excl_title=""):
+        target = self._resolve_window(self._window_arg(title_raw, ""))
+        if target is None:
+            return None
+        if excl_title and excl_title.lower() in str(
+                target.get("title", "")).lower():
+            return None
+        return target
+
+    def _wait_active_match(self, title_raw, excl_title="") -> int:
+        target = self._wait_target(title_raw, excl_title)
+        if target is None:
+            return 0
+        hwnd = int(target.get("hwnd", 0) or 0)
+        active = self._active_window_hwnd()
+        return hwnd if hwnd and active and hwnd == active else 0
+
+    def _wait_poll(self, predicate, timeout):
+        """Poll ``predicate`` until truthy, timeout, or the abort signal.
+
+        Timeout is in seconds; None waits indefinitely, 0 checks exactly
+        once.  The poll interval matches AHK's WinWait behaviour.
+        """
+        deadline = None if timeout is None else self._clock() + timeout
+        while True:
+            self._check()
+            value = predicate()
+            if value:
+                return value
+            if deadline is not None and self._clock() >= deadline:
+                return 0
+            self._wait_sleep(50)
+
+    def _wait_sleep(self, ms: int):
+        # Input backends sleep themselves; the dry backend only records it so
+        # tests can use a virtual clock instead of wall-clock waits.
+        self.sim.sleep_ms(ms)
+
+    def _win_wait(self, low: str, args):
+        title_raw, win_text, timeout, excl_title, excl_text = \
+            self._wait_args(args)
+        if self._wait_text_unsupported(win_text, excl_text):
+            return 0
+        if low == "winwait":
+            def predicate():
+                target = self._wait_target(title_raw, excl_title)
+                return int(target.get("hwnd", 0)) if target else 0
+            return self._wait_poll(predicate, timeout)
+        if low == "winwaitactive":
+            def predicate():
+                return self._wait_active_match(title_raw, excl_title)
+            return self._wait_poll(predicate, timeout)
+        if low == "winwaitnotactive":
+            def predicate():
+                return 0 if self._wait_active_match(
+                    title_raw, excl_title) else 1
+            return self._wait_poll(predicate, timeout)
+        # WinWaitClose: succeeds as soon as no matching window exists,
+        # including when none exists on the first check.
+        def predicate():
+            return 0 if self._wait_target(title_raw, excl_title) else 1
+        return self._wait_poll(predicate, timeout)
+
+    def _win_active(self, args):
+        title_raw, win_text, _timeout, excl_title, excl_text = \
+            self._wait_args(args)
+        if self._wait_text_unsupported(win_text, excl_text):
+            return 0
+        if not title_raw.strip() and not excl_title:
+            # AHK would use the Last Found Window here; this runtime does not
+            # track it, so report the real active handle instead of inventing
+            # a match.
+            return self._active_window_hwnd()
+        return self._wait_active_match(title_raw, excl_title)
+
     def _window_title(self, hwnd) -> str:
         own = self._own_handle(int(hwnd))
         if own is not None:
@@ -2601,6 +2724,13 @@ class Runtime:
                 self._assign_output(
                     parts[0], self._control_get_text([parts[1],
                                                       parts[2] if len(parts) > 2 else ""]))
+            return True
+        if low in ("winwait", "winwaitclose", "winwaitactive",
+                   "winwaitnotactive"):
+            self._win_wait(low, parts)
+            return True
+        if low == "winactive":
+            self._win_active(parts)
             return True
         return False
 
@@ -4098,6 +4228,8 @@ class Runtime:
             return
         if low in ("wingetpos", "wingetclientpos", "wingettitle",
                    "winclose", "winkill", "winmove", "winsettransparent",
+                   "winwait", "winwaitclose", "winwaitactive",
+                   "winwaitnotactive", "winactive",
                    "controlgetpos", "controlgettext"):
             if self._legacy_window(low, rest,
                                    getattr(st, "omitted_first", False)):
