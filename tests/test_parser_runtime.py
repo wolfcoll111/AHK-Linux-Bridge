@@ -266,6 +266,26 @@ def test_braceless_if_does_not_steal_enclosing_else():
     assert rt.vars.get("y") == 2
 
 
+def test_implicit_concat_resolves_mixed_case_vars():
+    # Natro's loop body builds GUI options with `A_index` while the loop
+    # defines `A_Index`; AHK var names are case-insensitive.
+    sc, rt, sim = run(
+        'xCoords := 0\nout := ""\n'
+        'loop 2 {\n'
+        '    xCoords := 256 + (62 * A_index)\n'
+        '    out := "x" xCoords " y124 w40 h15 vBlenderAdd" A_index " Disabled"\n'
+        '}\n'
+    )
+    rt.run_auto()
+    assert rt.vars["out"] == "x380 y124 w40 h15 vBlenderAdd2 Disabled"
+
+
+def test_send_concat_resolves_mixed_case_vars():
+    sc, rt, sim = run('Value := 7\nSend "x" value\n')
+    rt.run_auto()
+    assert ("type", "x7") in [(e[0], e[1]) for e in sim.log]
+
+
 def test_dot_concat_keeps_periods_inside_strings_and_nested_ternary():
     # Regression: the fallback split every "." including periods inside
     # string literals, corrupting `"**\n" . (cond ? ... : "empty.**")`

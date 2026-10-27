@@ -74,7 +74,8 @@ ahk-bridge record --seconds 15 --out macro.json --ahk recorded.ahk
   `Break`/`Continue`, functions with parameter defaults (including
   `unset`), classes with static methods and includes.
 - `x := expr`, arrow functions returning object literals, objects,
-  arrays, maps, case-insensitive variables, `Fn.Bind(...)` partial
+  arrays, maps, case-insensitive variables in expressions and
+  concatenation (`A_index` reads `A_Index`), `Fn.Bind(...)` partial
   application, and `StrSplit` by delimiter or character index.
 - `MsgBox`, live `PixelSearch` (mss, `FoundX`/`FoundY`), image search,
   screen capture and `WinActivate` (Hyprland match, else logged).

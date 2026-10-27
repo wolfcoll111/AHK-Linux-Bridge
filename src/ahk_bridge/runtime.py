@@ -3692,20 +3692,20 @@ class Runtime:
             return "q"
         if re.match(r"^%([A-Za-z_]\w*)%$", body) or "%" in body and re.search(r"%[A-Za-z_]\w*%", body):
             return "v"
-        if body in self.vars:
+        if self._var_key(body) is not None:
             return "v"
         if re.match(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$", body):
             base = body.split(".", 1)[0]
-            if base in self.vars:
+            if self._var_key(base) is not None:
                 return "v"
         if re.match(r"^[A-Za-z_]\w*\s*\(.*\)$", body, re.DOTALL):
             return "v"
         m = re.match(r"^([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)+\s*\(.*\)$",
                      body, re.DOTALL)
-        if m and m.group(1) in self.vars:
+        if m and self._var_key(m.group(1)) is not None:
             return "v"
         m = re.match(r"^([A-Za-z_]\w*)(?:\[.+?\])+$", body, re.DOTALL)
-        if m and m.group(1) in self.vars:
+        if m and self._var_key(m.group(1)) is not None:
             return "v"
         return "lit"
 
@@ -5215,7 +5215,7 @@ class Runtime:
         if re.fullmatch(r"-?\d+(?:\.\d+)?", term):
             return True
         if re.fullmatch(r"[A-Za-z_]\w*", term):
-            return term in self.vars
+            return self._var_key(term) is not None
         if re.search(r"[+\-*/%]", term):
             return True
         if re.match(r"^[A-Za-z_]\w*\s*\(", term):
@@ -5224,7 +5224,7 @@ class Runtime:
             return True
         m = re.fullmatch(r"([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)+", term)
         if m:
-            return m.group(1) in self.vars
+            return self._var_key(m.group(1)) is not None
         if re.search(r"\[[^\]]+\]", term):
             return True
         return False
@@ -5412,7 +5412,8 @@ class Runtime:
             except (TypeError, ValueError, IndexError, KeyError):
                 raise ValueError("bad subscript")
         if isinstance(node, ast.Name):
-            v = self.vars.get(node.id, 0)
+            key = self._var_key(node.id)
+            v = self.vars.get(key, 0) if key is not None else 0
             if isinstance(v, bool):
                 return int(v)
             if isinstance(v, (int, float)):

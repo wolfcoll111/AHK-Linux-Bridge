@@ -64,6 +64,27 @@ def test_gui_construct_add_show_submit():
         close_guis(rt)
 
 
+def test_gui_options_concat_mixed_case_loop_var():
+    # Natro builds `vBlenderAdd` A_index with the legacy `A_index` spelling
+    # inside a loop; the control must still register under BlenderAdd1..3.
+    rt = run(
+        'MainGui := Gui("", "Blender")\n'
+        'loop 3 {\n'
+        '    xCoords := 256 + (62 * A_index)\n'
+        '    MainGui.Add("Button", "x" xCoords " y124 w40 h15 vBlenderAdd" A_index " Disabled", "Add")\n'
+        '}\n'
+    )
+    try:
+        gui = rt.vars["MainGui"]
+        for i in (1, 2, 3):
+            control = gui.get_control(f"BlenderAdd{i}")
+            assert not control.missing
+            assert control.get_text() == "Add"
+        assert not any("not found" in entry for entry in rt.logs)
+    finally:
+        close_guis(rt)
+
+
 def test_gui_named_and_arrow_events():
     rt = run(
         'MainGui := Gui("", "Events")\n'
